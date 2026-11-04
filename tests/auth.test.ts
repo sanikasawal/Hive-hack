@@ -98,7 +98,8 @@ test('viewer projection drops absolute paths, payloads, assumptions, diffs and t
   for (const forbidden of [root, '/home/u', '/etc/passwd', leaked, 'secret-assumption', 'secret-payload', 'DIFF-CONTENT', 'EXCERPT', 'private notes', 'FAIL at', 'abc'])
     assert.ok(!json.includes(forbidden), `view leaked ${forbidden}`);
   assert.equal(view.workspace.name, 'acme-repo');
-  assert.deepEqual(view.sessions[0], { id: SESSION_A, member: 'alice', agent: 'claude-a', task: view.sessions[0]!.task, step: 'agreement proposed' });
+  // connector: null because this session's token has no checkout report (Hive Connect, spec section 2).
+  assert.deepEqual(view.sessions[0], { id: SESSION_A, member: 'alice', agent: 'claude-a', task: view.sessions[0]!.task, step: 'agreement proposed', connector: null });
   assert.ok(view.sessions[0]!.task!.length <= 120 && view.sessions[0]!.task!.startsWith('Fix src/pricing.ts'));
   assert.ok(view.findings[0]!.evidence.length <= 300);
   assert.deepEqual(view.findings[0]!.files, ['src/a.ts']);

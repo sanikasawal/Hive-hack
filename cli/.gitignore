@@ -1,0 +1,3 @@
+# Built output is committed so `npx github:Vishal2602/Hive-hack` works before npm publishing.
+!dist/
+node_modules/

@@ -208,4 +208,40 @@ export const migrations: string[] = [
     PRIMARY KEY(repository_id, member, path)
   );
   `,
+  // Hive Connect: token kinds (connector = member-role credential bound to one checkout), device pairing
+  // (poll secret stored as sha256; requester is the sha256 of the client IP) and checkout reports per token.
+  `
+  ALTER TABLE tokens ADD COLUMN kind TEXT NOT NULL DEFAULT 'member' CHECK(kind IN ('member','connector','viewer-link'));
+  ALTER TABLE tokens ADD COLUMN repo_identity TEXT;
+  ALTER TABLE tokens ADD COLUMN machine TEXT;
+  ALTER TABLE tokens ADD COLUMN last_seen_at INTEGER;
+  CREATE TABLE pairings(
+    id TEXT PRIMARY KEY,
+    user_code TEXT NOT NULL UNIQUE,
+    poll_secret_hash TEXT NOT NULL,
+    repo_json TEXT NOT NULL,
+    machine TEXT NOT NULL,
+    client TEXT,
+    status TEXT NOT NULL CHECK(status IN ('pending','approved','denied','consumed')),
+    token_id TEXT,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    approved_by TEXT,
+    approver TEXT,
+    requester TEXT NOT NULL
+  );
+  CREATE INDEX pairings_by_requester ON pairings(requester, status, expires_at);
+  CREATE INDEX pairings_by_created ON pairings(created_at);
+  CREATE TABLE checkouts(
+    token_id TEXT PRIMARY KEY,
+    member TEXT NOT NULL,
+    machine TEXT,
+    repo_json TEXT NOT NULL,
+    branch TEXT,
+    head TEXT,
+    base_commit TEXT,
+    dirty_json TEXT NOT NULL,
+    reported_at INTEGER NOT NULL
+  );
+  `,
 ];

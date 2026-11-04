@@ -1,12 +1,13 @@
 import { basename } from 'node:path';
-import { Coordinator, type CoordinatorOptions } from './domain/coordinator.ts';
+import { Coordinator, type CoordinatorOptions, type SessionConnector, type SnapshotSession } from './domain/coordinator.ts';
+import { CheckoutService, stripUrlCredentials } from './server/checkouts.ts';
 import type { Finding, Intent, Snapshot } from './domain/types.ts';
 import { GraphIndex, type FileChanges, type IndexedEdge, type IndexedSymbol } from './graph/index.ts';
 import { ClaimService, type Claim, type ClaimRule } from './contracts/claims.ts';
 import { ContractService, type ContractCheck } from './contracts/service.ts';
 import type { ProposeInput, ReviseInput } from './domain/coordinator.ts';
 import type { Contract, VerificationRun } from './domain/types.ts';
-import { MetaAnalyzer } from './intelligence/meta.ts';
+import { MetaAnalyzer, type ModelDiagnosis } from './intelligence/meta.ts';
 import { AnalysisService } from './intelligence/service.ts';
 import type { Analysis, Analyzer } from './intelligence/types.ts';
 import { OperationEngine, type Gate } from './ops/engine.ts';
@@ -29,7 +30,9 @@ export interface ServiceOptions extends Omit<CoordinatorOptions, 'detectors' | '
   analyzer?: Analyzer;
 }
 export interface GraphSummary { workspaceId: string; indexed: boolean; symbols: number; edges: number; files: number; lastSync: FileChanges | null }
-export interface ServiceSnapshot extends Snapshot { graph: GraphSummary; proposals: Proposal[]; claims: Claim[]; analysis: Analysis | null; model: { configured: boolean; model: string }; remote?: RemoteState }
+export interface ServiceSnapshot extends Snapshot { sessions: SnapshotSession[]; graph: GraphSummary; proposals: Proposal[]; claims: Claim[]; analysis: Analysis | null; model: ModelSnapshot; remote?: RemoteState }
+/** Model state for members/admins: the key itself never appears, only whether it is set on the hub. lastDiagnose is memory only. */
+export interface ModelSnapshot { configured: boolean; model: string; baseUrlHost?: string | null; proxy?: boolean; lastDiagnose?: ModelDiagnosis | null }
 export interface HookCheck {
   file: string;
   pendingContracts: { id: string; version: number; title: string; missing: string[] }[];
@@ -53,6 +56,8 @@ export class HiveService {
   readonly analysis: AnalysisService;
   readonly analyzer: Analyzer;
   readonly remote: RemoteChanges;
+  /** Hive Connect checkout reports, one per connector/member token. */
+  readonly checkouts: CheckoutService;
   readonly store: Store;
   private readonly graphs = new Map<string, GraphIndex>();
   private readonly lastSync = new Map<string, FileChanges>();
@@ -69,6 +74,7 @@ export class HiveService {
     this.tsconfig = options.tsconfig;
     this.clock = options.clock ?? Date.now;
     this.coordinator = new Coordinator({ ...options, detectors: [intents => this.graphFindings(intents), () => this.directEditFindings(), () => this.claims.findings(this.graph()), () => this.remote.findings()] });
+    this.checkouts = new CheckoutService(this.store, this.clock);
     this.remote = new RemoteChanges({ store: this.store, coordinator: this.coordinator, graph: () => this.graph(), clock: this.clock });
     this.claims = new ClaimService(this.store, this.coordinator.repositoryId, this.clock);
     this.contracts = new ContractService({ store: this.store, coordinator: this.coordinator, graph: id => this.graph(id), sync: id => this.sync(id), clock: this.clock,
@@ -224,9 +230,10 @@ export class HiveService {
 
   /** Snapshot without a drift check: no file hashing, only DB reads and graph lookups. */
   private buildSnapshot(): ServiceSnapshot {
-    const analyzer = this.analyzer as { configured?: boolean; model?: string };
+    const analyzer = this.analyzer as { configured?: boolean; model?: string; baseUrlHost?: string; proxy?: boolean };
     return { ...this.coordinator.snapshot(), graph: this.graphSummary(), proposals: this.engine.proposals(20), claims: this.claims.active(), analysis: this.analysis.latest(),
-      model: { configured: analyzer.configured ?? true, model: analyzer.model ?? 'custom' }, remote: this.remote.state() };
+      model: { configured: analyzer.configured ?? true, model: analyzer.model ?? 'custom', baseUrlHost: analyzer.baseUrlHost ?? null, proxy: analyzer.proxy ?? false,
+        lastDiagnose: this.analysis.lastDiagnose }, remote: this.remote.state() };
   }
 
   // ---- snapshot cache ------------------------------------------------------------------------------
@@ -320,17 +327,25 @@ export class HiveService {
   }
 
   /** Members with their active sessions. Token metadata (never values) is included only when the caller passes it (admin). */
-  members(tokens: MemberToken[] = [], snapshot: Pick<ServiceSnapshot, 'sessions' | 'intents'> = { sessions: this.coordinator.sessions(), intents: this.coordinator.intents() }): MemberSummary[] {
+  members(tokens: MemberToken[] = [], snapshot: Pick<ServiceSnapshot, 'sessions' | 'intents'> = { sessions: this.coordinator.sessions(), intents: this.coordinator.intents() },
+    connectorTokens: MemberToken[] = []): MemberSummary[] {
     const byMember = new Map<string, MemberSummary>();
     const entry = (member: string): MemberSummary => {
       let found = byMember.get(member);
-      if (!found) { found = { member, roles: [], tokens: [], sessions: [] }; byMember.set(member, found); }
+      if (!found) { found = { member, roles: [], tokens: [], connectors: [], sessions: [] }; byMember.set(member, found); }
       return found;
     };
     for (const token of tokens) {
       const found = entry(token.member);
       if (token.revokedAt === null && !found.roles.includes(token.role)) found.roles.push(token.role);
-      found.tokens.push({ id: token.id, label: token.label, role: token.role, prefix: token.prefix, createdAt: token.createdAt, lastUsedAt: token.lastUsedAt, revokedAt: token.revokedAt });
+      found.tokens.push({ id: token.id, label: token.label, role: token.role, kind: token.kind ?? 'member', prefix: token.prefix, createdAt: token.createdAt, lastUsedAt: token.lastUsedAt, revokedAt: token.revokedAt });
+    }
+    for (const token of [...tokens, ...connectorTokens]) {
+      if (token.kind !== 'connector' || token.revokedAt !== null) continue;
+      const found = entry(token.member);
+      const list = found.connectors ??= [];
+      if (list.some(c => c.tokenId === token.id)) continue;
+      list.push(connectorSummary(token, this.checkouts.get(token.id)));
     }
     for (const session of snapshot.sessions) {
       const found = entry(session.member ?? OPERATOR);
@@ -344,11 +359,19 @@ export class HiveService {
 
 // ---- viewer-safe projection (pure) ------------------------------------------------------------------
 const OPERATOR = 'operator';
-export interface MemberToken { id: string; label: string; member: string; role: string; prefix: string; createdAt: number; lastUsedAt: number | null; revokedAt: number | null }
+export interface MemberToken { id: string; label: string; member: string; role: string; kind?: string; repoIdentity?: string | null; machine?: string | null; prefix: string;
+  createdAt: number; lastUsedAt: number | null; lastSeenAt?: number | null; revokedAt: number | null }
+/** An active connector credential and its last checkout report (relative paths only, no remote URL). */
+export interface ConnectorSummary {
+  tokenId: string; label: string; machine: string | null; repoIdentity: string | null; repoName: string | null; branch: string | null;
+  headShort: string | null; dirtyCount: number; reportedAt: number | null; lastUsedAt: number | null; createdAt: number;
+}
 export interface MemberSummary {
   member: string;
   roles: string[];
-  tokens: Omit<MemberToken, 'member'>[];
+  tokens: Pick<MemberToken, 'id' | 'label' | 'role' | 'kind' | 'prefix' | 'createdAt' | 'lastUsedAt' | 'revokedAt'>[];
+  /** Active connectors for this member. Admins see everyone's; a member sees their own. */
+  connectors?: ConnectorSummary[];
   sessions: { id: string; agent: string; client: string | null; task: string | null }[];
 }
 export interface ViewExtras {
@@ -362,7 +385,7 @@ export interface HiveView {
   revision: number;
   graph: { indexed: boolean; symbols: number; files: number };
   model: { configured: boolean; model: string };
-  sessions: { id: string; member: string; agent: string; task: string | null; step: string }[];
+  sessions: { id: string; member: string; agent: string; task: string | null; step: string; connector?: SessionConnector | null }[];
   members: { member: string; sessions: number }[];
   findings: { kind: string; severity: string; source: string; evidence: string; sessions: string[]; symbols: string[]; files: string[] }[];
   contracts: {
@@ -375,18 +398,25 @@ export interface HiveView {
     createdAt: number; updatedAt: number;
   }[];
   events: ViewEvent[];
-  analysis: { status: string; summary: string; model: string | null; latencyMs: number | null; findings: number; at: number } | null;
+  analysis: { status: string; summary: string; model: string | null; latencyMs: number | null; findings: number; at: number; relayedBy?: string } | null;
   /** Laptop sync: which members have uncommitted changes Hive is checking (relative paths only). */
   remote?: { baseCommit: string | null; members: { member: string; files: { path: string; deleted: boolean; updatedAt: number }[] }[] };
 }
 export interface ViewEvent { seq: number; at: number; type: string; detail: string }
+
+function connectorSummary(token: MemberToken, checkout: { machine: string | null; repo: { name: string; identity: string | null }; branch: string | null; head: string | null; dirty: unknown[]; reportedAt: number } | undefined): ConnectorSummary {
+  const clean = (value: string | null | undefined, max: number) => value ? cap(stripUrlCredentials(value), max) : null;
+  return { tokenId: token.id, label: cap(token.label, 80), machine: clean(token.machine ?? checkout?.machine, 80), repoIdentity: clean(token.repoIdentity ?? checkout?.repo.identity, 200),
+    repoName: clean(checkout?.repo.name, 120), branch: clean(checkout?.branch, 120), headShort: checkout?.head ? checkout.head.slice(0, 7) : null,
+    dirtyCount: checkout?.dirty.length ?? 0, reportedAt: checkout?.reportedAt ?? null, lastUsedAt: token.lastUsedAt, createdAt: token.createdAt };
+}
 
 export function cap(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
 /** Removes workspace roots, other absolute paths and token-shaped strings, then caps the length. */
 export function scrubText(value: string, roots: string[], max: number): string {
-  let out = value;
+  let out = stripUrlCredentials(value);
   for (const root of [...roots].filter(Boolean).sort((a, b) => b.length - a.length)) out = out.split(`${root}/`).join('').split(root).join('.');
   out = out.replace(/(^|[\s(:'"=,[])(?:~\/|\/|[A-Za-z]:\\)[^\s'"(),\]]+/g, '$1[path]');
   out = out.replace(/hive_(adm|mem|view)_[0-9A-Za-z]+/g, 'hive_$1_[redacted]');
@@ -417,8 +447,12 @@ export function sanitizeView(snapshot: ServiceSnapshot, extras: ViewExtras): Hiv
       rank = 0;
       for (const contract of snapshot.contracts) if (contract.participants.includes(session.id)) rank = Math.max(rank, STEP_RANK[contract.status] ?? 0);
     }
+    const c = session.connector;
+    const connector: SessionConnector | null = c ? { machine: c.machine ? text(c.machine, 80) : null, repoName: text(c.repoName, 120),
+      branch: c.branch ? text(c.branch, 120) : null, headShort: c.headShort && /^[0-9a-f]{1,12}$/i.test(c.headShort) ? c.headShort : null,
+      dirtyCount: Math.max(0, Math.trunc(c.dirtyCount)), reportedAt: c.reportedAt } : null;
     return { id: session.id, member: cap(session.member ?? OPERATOR, 80), agent: cap(session.name, 80), task: intent ? text(intent.task, 120) : null,
-      step: rank < 0 ? 'joined' : STEP_LABEL[rank]! };
+      step: rank < 0 ? 'joined' : STEP_LABEL[rank]!, connector };
   });
   const members = new Map<string, number>();
   for (const session of sessions) members.set(session.member, (members.get(session.member) ?? 0) + 1);
@@ -450,7 +484,8 @@ export function sanitizeView(snapshot: ServiceSnapshot, extras: ViewExtras): Hiv
     }),
     events: sanitizeEvents(snapshot.events.slice(-100), roots),
     analysis: snapshot.analysis ? { status: snapshot.analysis.status, summary: text(snapshot.analysis.summary, 300), model: snapshot.analysis.model,
-      latencyMs: snapshot.analysis.latencyMs, findings: snapshot.analysis.findings.length, at: snapshot.analysis.at } : null,
+      latencyMs: snapshot.analysis.latencyMs, findings: snapshot.analysis.findings.length, at: snapshot.analysis.at,
+      ...(snapshot.analysis.relayedBy ? { relayedBy: cap(snapshot.analysis.relayedBy, 80) } : {}) } : null,
     remote: { baseCommit: snapshot.remote?.baseCommit ? snapshot.remote.baseCommit.slice(0, 12) : null,
       members: (snapshot.remote?.members ?? []).slice(0, 20).map(m => ({ member: cap(m.member, 80),
         files: m.files.filter(f => relativeOnly([f.path]).length).slice(0, 50).map(f => ({ path: cap(f.path, 200), deleted: f.deleted, updatedAt: f.updatedAt })) })) },

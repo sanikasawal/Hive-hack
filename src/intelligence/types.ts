@@ -47,6 +47,8 @@ export interface Analysis {
   error: string | null;
   evidenceRefs: { symbols: string[]; files: string[]; sessions: string[]; candidates: number };
   at: number;
+  /** Member whose laptop sent this request (operator relay fallback); absent for a direct call from the hub. */
+  relayedBy?: string;
 }
 
 export class AnalysisUnavailable extends Error {

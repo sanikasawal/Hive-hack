@@ -4,6 +4,47 @@ Environment: macOS, Node v22.22.3, npm 10.9.8. Build dates: 2026-11-01 and 2026-
 below the cloud section). The folder became a git repository during the cloud build; the cloud
 release checks ran on the tree at commit `46bf54d` plus documentation edits.
 
+## Hosted hub checks (run 2026-11-03 against https://hive-hack-production.up.railway.app, deployed commit `b22bea0`)
+- Deploy `280042f5` (Railpack ran the root `npm run build`, which built the dashboard with Vite): `/healthz` 200
+  `{"ok":true,"indexed":true}`; `/ui`, `/ui/connect`, `/ui/pair/<code>`, `/ui/members`, `/ui/signin` all 200. Bundle
+  scan: the only `hive_*` strings in `/ui/assets/index-*.js` are the prototype fixtures from `web/src/mock/` (display
+  prefixes and the labelled `DEMO_TOKEN`, rendered only when the app runs in mock mode); no credential.
+- `npm run typecheck` clean; `npm test` 141/141 (16 s) on the tree at `b22bea0` plus the acceptance files.
+- Real CLI against the hosted hub (clone of `hive-playground` in a scratch dir, isolated HOME,
+  `HIVE_CONNECT_NO_KEYCHAIN=1`, `connect --hub <hub> --no-browser --yes --client claude --no-node`): pairing code
+  printed, approved with the hub's admin token via `pair_approve` ("Approved by operator"), credential stored 0600,
+  `.mcp.json` and `.claude/settings.local.json` written with zero `hive_` strings and listed in `.git/info/exclude`,
+  "Verified: credential accepted and checkout reported", exit 0. `status`: credential valid (member, connector).
+  Admin `member_list`: one connector `pg main@9c14788 dirty=0 machine=Mac.lan`. Stdio bridge (`hive-connect mcp`)
+  against the hosted `/mcp`: initialize returned server `hive 0.1.0`, protocol 2025-03-26; `tools/list` returned 16
+  `hive_*` tools; `tools/call hive_context` returned the hub's own error "Call hive_register first" (a round trip
+  through the tool handler). `disconnect`: credential revoked on the hub and deleted locally, Hive's entries removed
+  from both config files, exit 0; `member_list` shows 0 connectors afterwards. Run twice; both clean. PASS.
+- `model_diagnose` (admin, live): `configured: true`, `baseUrlHost: api.meta.ai`, `proxy: false`; `GET /models` 200
+  with `data: []` (x-request-id d50e5293-f7a8-4a6d-9d4a-f0568bd1b36a); one-token chat 404 `model_not_found`
+  (x-request-id cbfc176b-ed15-4c1c-a27c-06df946e140d); egress 152.55.180.65; 456 ms; verdict `no_models_for_host`.
+  The same key from a laptop earlier the same day listed 9 models and completed a request. Unchanged since the first
+  diagnosis; no key or header appears in the diagnostic output.
+
+Not run against the hosted hub: a Muse Code session, two real people on two laptops, a real two-agent `claude -p` run.
+
+## Hive Connect release checks (run 2026-11-03, locally; nothing deployed or published)
+- `npm run typecheck`: clean. `npm test`: **141 tests, 141 passed, 0 failed** (~16 s), including
+  `tests/acceptance-two-users.test.ts` (two users, real CLI from `cli/dist`, stdio bridge, prompt hook, disconnect;
+  ~2 s). `npm run build:cli`: clean, `cli/dist` unchanged by the rebuild. `npm run test:cli`: 12/12.
+  `cd web && npm run typecheck && npm run build`: clean (Vite chunk-size warning only).
+- Local CLI round trip (scratch script; daemon on a copy of `fixtures/billing`, temp data dir, throwaway admin
+  token, no `MODEL_API_KEY`): `connect --yes --no-browser --client claude --no-node` from a temp git repo with the
+  fallback store, pairing approved with a member token: exit 0, credentials.json mode 600; `/me` 200
+  `role=member kind=connector`; `checkout_report` 200; `member_list` shows the connector as `main@<head7>`;
+  `disconnect` exit 0; `/me` afterwards 401. PASS.
+- `model_diagnose` (admin) against that daemon without a key: 200, `verdict: "not_configured"`. PASS.
+- `scripts/acceptance-live.ts --dry-run`: hub, two pairings, credentials, generated config and both bridges OK
+  (16 `hive_*` tools each); Claude was NOT started. No real two-agent run was made.
+
+Not run here: `npm publish`, a Muse Code session, a real `claude -p` two-agent run. (The CLI against the hosted hub: see
+"Hosted hub checks" above.)
+
 ## Cloud build release checks (run 2026-11-03, locally; nothing deployed)
 - `npm run typecheck`: clean. `npm test`: **107 tests, 107 passed, 0 failed** (~20 s; the 47 earlier
   tests kept). `cd web && npm run typecheck && npm run build`: clean (Vite warns that the single JS

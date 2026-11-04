@@ -4,6 +4,7 @@ import type { Coordinator } from '../domain/coordinator.ts';
 import type { Finding } from '../domain/types.ts';
 import { sha256, type GraphIndex } from '../graph/index.ts';
 import type { Store } from '../store/sqlite.ts';
+import type { ModelDiagnosis } from './meta.ts';
 import { AnalysisInvalid, AnalysisUnavailable, type Analysis, type Analyzer, type EvidenceBundle, type EvidenceChange, type EvidenceDependent, type EvidenceSymbol } from './types.ts';
 
 export interface AnalysisServiceOptions {
@@ -81,7 +82,8 @@ export class AnalysisService {
     const result = row.result_json ? JSON.parse(row.result_json) as Partial<Analysis> : {};
     return { id: row.id, status: row.status, summary: result.summary ?? '', findings: result.findings ?? [], model: row.model, latencyMs: row.latency_ms === null ? null : Number(row.latency_ms),
       usage: row.usage_json ? JSON.parse(row.usage_json) as Analysis['usage'] : null, attempts: result.attempts ?? 0, dropped: result.dropped ?? [], inputHash: row.input_hash,
-      revision: Number(row.revision), error: row.error, evidenceRefs: result.evidenceRefs ?? { symbols: [], files: [], sessions: [], candidates: 0 }, at: Number(row.created_at) };
+      revision: Number(row.revision), error: row.error, evidenceRefs: result.evidenceRefs ?? { symbols: [], files: [], sessions: [], candidates: 0 }, at: Number(row.created_at),
+      ...(result.relayedBy ? { relayedBy: result.relayedBy } : {}) };
   }
   latest(): Analysis | null {
     const row = this.store.get<Row>('SELECT * FROM analyses WHERE repository_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1', this.coordinator.repositoryId);
@@ -94,11 +96,25 @@ export class AnalysisService {
     this.store.transaction(() => {
       this.store.run('INSERT INTO analyses(id, repository_id, input_hash, revision, status, model, latency_ms, usage_json, result_json, error, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         analysis.id, this.coordinator.repositoryId, analysis.inputHash, analysis.revision, analysis.status, analysis.model, analysis.latencyMs, analysis.usage ? JSON.stringify(analysis.usage) : null,
-        JSON.stringify({ summary: analysis.summary, findings: analysis.findings, attempts: analysis.attempts, dropped: analysis.dropped, evidenceRefs: analysis.evidenceRefs }), analysis.error, analysis.at);
+        JSON.stringify({ summary: analysis.summary, findings: analysis.findings, attempts: analysis.attempts, dropped: analysis.dropped, evidenceRefs: analysis.evidenceRefs,
+          ...(analysis.relayedBy ? { relayedBy: analysis.relayedBy } : {}) }), analysis.error, analysis.at);
       this.coordinator.emit(`analysis.${analysis.status}`, analysis.status === 'ok' || analysis.status === 'stale' ? `${analysis.model}: ${analysis.findings.length} finding(s), ${analysis.latencyMs} ms` : analysis.error ?? analysis.status,
         { analysisId: analysis.id, status: analysis.status, model: analysis.model, findings: analysis.findings.length });
     });
     return analysis;
+  }
+
+  // ---- model diagnosis (admin) ----------------------------------------------------------------------
+  private lastDiagnosis: ModelDiagnosis | null = null;
+  /** The most recent model_diagnose result since this hub started (memory only). */
+  get lastDiagnose(): ModelDiagnosis | null { return this.lastDiagnosis; }
+  /** Runs the analyzer's diagnosis (GET /models + a one-token chat completion from this hub) and keeps the result. */
+  async diagnose(): Promise<ModelDiagnosis> {
+    const analyzer = this.analyzer as Partial<{ diagnose(): Promise<ModelDiagnosis> }>;
+    if (typeof analyzer.diagnose !== 'function') throw new Error('This Hive analyzer does not support model_diagnose');
+    const result = await analyzer.diagnose.call(this.analyzer);
+    this.lastDiagnosis = result;
+    return result;
   }
 
   // ---- laptop relay ---------------------------------------------------------------------------------
@@ -126,10 +142,12 @@ export class AnalysisService {
     const analyzer = this.analyzer as Partial<{ parseResponse(t: string, b: EvidenceBundle, k: string[], l: number): Awaited<ReturnType<Analyzer['analyze']>> }>;
     const { bundle } = entry;
     const base: Analysis = { id: randomUUID(), status: 'unavailable', summary: '', findings: [], model: null, latencyMs: input.latencyMs, usage: null, attempts: 1, dropped: [], inputHash: bundle.inputHash,
-      revision: bundle.revision, error: null, at: this.clock(),
+      revision: bundle.revision, error: null, at: this.clock(), relayedBy: input.via,
       evidenceRefs: { symbols: bundle.symbols.map(s => s.key), files: [...new Set([...bundle.symbols.map(s => s.file), ...(bundle.changes ?? []).map(c => c.file)])], sessions: bundle.intents.map(i => i.sessionId), candidates: bundle.candidates.length } };
     if (input.httpStatus < 200 || input.httpStatus >= 300) {
-      return this.record({ ...base, error: `Meta API HTTP ${input.httpStatus} (relayed by ${input.via}): ${input.responseText.slice(0, 300)}` });
+      const sentence = input.httpStatus === 0 ? `The laptop relaying this request (${input.via}) could not reach the model provider.`
+        : `The model provider did not accept the request relayed by ${input.via} (HTTP ${input.httpStatus}).`;
+      return this.record({ ...base, error: `${sentence} Details: Meta API HTTP ${input.httpStatus} (relayed by ${input.via}): ${input.responseText.slice(0, 300)}` });
     }
     try {
       const result = analyzer.parseResponse!(input.responseText, bundle, entry.known, input.latencyMs);

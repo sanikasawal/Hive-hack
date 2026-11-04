@@ -1,0 +1,93 @@
+/* /pair/:code approval page. Semantic tokens only; checked in light and dark, 390 to 1440 px. */
+.wrap {
+  display: grid;
+  gap: var(--space-6);
+  inline-size: 100%;
+  max-inline-size: 32rem;
+  min-inline-size: 0;
+}
+
+.card {
+  display: grid;
+  gap: var(--space-8);
+  min-inline-size: 0;
+  padding: var(--space-10) var(--space-8);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-surface);
+  background: var(--surface);
+  box-shadow: var(--shadow-resting);
+}
+
+.wordmark {
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: 500;
+  letter-spacing: var(--tracking-display);
+  color: var(--foreground);
+}
+
+.heading { display: grid; gap: var(--space-2); min-inline-size: 0; }
+.title { font-size: var(--text-2xl); overflow-wrap: anywhere; }
+.lede { color: var(--text-secondary); line-height: 1.55; overflow-wrap: anywhere; }
+.muted { color: var(--text-muted); font-size: var(--text-sm); line-height: 1.5; }
+
+.code {
+  display: inline-block;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-muted);
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: var(--text-lg);
+  letter-spacing: .08em;
+}
+
+.facts { display: grid; gap: var(--space-4); margin: 0; min-inline-size: 0; }
+.fact {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-1);
+  min-inline-size: 0;
+}
+.fact dt { color: var(--text-muted); font-size: var(--text-sm); }
+.fact dd { margin: 0; color: var(--foreground); overflow-wrap: anywhere; }
+.mono { font-family: var(--font-mono); font-size: var(--text-sm); }
+
+@media (min-width: 520px) {
+  .fact { grid-template-columns: 9rem minmax(0, 1fr); align-items: baseline; gap: var(--space-4); }
+}
+
+.form { display: grid; gap: var(--space-4); }
+.error {
+  display: flex;
+  gap: var(--space-2);
+  align-items: flex-start;
+  color: var(--danger);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+.error svg { flex: none; margin-block-start: .15em; }
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-3);
+}
+
+.footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  justify-content: space-between;
+  padding-inline: var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+@media (max-width: 480px) {
+  .card { padding: var(--space-8) var(--space-6); border-radius: var(--radius-panel); }
+  .actions > * { flex: 1 1 auto; }
+}

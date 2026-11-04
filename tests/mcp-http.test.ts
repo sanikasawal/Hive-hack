@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import { createServer as createHttpServer } from 'node:http';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +12,8 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { callDaemon } from '../src/server/client.ts';
+import type { Auth } from '../src/server/auth.ts';
+import { createMcpHttpHandler, MISSING_INITIALIZATION } from '../src/server/mcpHttp.ts';
 import { registerHiveTools, startHeartbeat, type ToolBackend } from '../src/server/tools.ts';
 
 const ADMIN = 'test-admin-token-not-production';
@@ -24,8 +27,8 @@ async function unusedPort(): Promise<number> {
   return address.port;
 }
 
-async function startDaemon(): Promise<{ url: string; env: Record<string, string>; daemon: ChildProcess }> {
-  const port = await unusedPort();
+async function startDaemon(fixedPort?: number): Promise<{ url: string; env: Record<string, string>; daemon: ChildProcess }> {
+  const port = fixedPort ?? await unusedPort();
   const env: Record<string, string> = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
   Object.assign(env, { HIVE_TOKEN: ADMIN, HIVE_PORT: String(port), HIVE_URL: `http://127.0.0.1:${port}`, HIVE_DB: ':memory:', HIVE_PROJECT_ROOT: fixture });
   delete env.PORT; delete env.HIVE_HOST;
@@ -261,5 +264,129 @@ test('stdio heartbeat survives 503 draining responses for up to 3 retries, then 
   } finally {
     if (previousUrl === undefined) delete process.env.HIVE_URL; else process.env.HIVE_URL = previousUrl;
     await new Promise<void>(resolve => stub.close(() => resolve()));
+  }
+});
+
+async function stopDaemon(daemon: ChildProcess): Promise<void> {
+  const exited = once(daemon, 'exit'); daemon.kill();
+  if (daemon.exitCode === null) await exited;
+}
+
+/** createMcpHttpHandler on a real HTTP server with a scripted Hive backend and captured logs. */
+async function handlerHarness() {
+  const logs: string[] = [];
+  const expired = new Set<string>();
+  const heartbeats: string[] = [];
+  let registered = 0;
+  const auth: Auth = { role: 'member', member: 'Alice', tokenId: 'tok-alice' };
+  const handler = createMcpHttpHandler({
+    version: 'test', log: line => logs.push(line), streamHeartbeatMs: 20,
+    command: async (_auth, command) => {
+      if (command.action === 'register') return { id: `00000000-0000-4000-8000-00000000000${++registered}` };
+      throw new Error(`unexpected ${String(command.action)}`);
+    },
+    snapshot: async () => ({ ok: true }),
+    heartbeat: id => { heartbeats.push(id); if (expired.has(id)) throw new Error('Unknown or expired session; register again'); },
+    finish: async () => ({}),
+  });
+  const server = createHttpServer((request, response) => { void handler.handle(request, response, auth); });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('No harness port');
+  const url = `http://127.0.0.1:${address.port}`;
+  const close = async () => { await handler.closeAll(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); };
+  return { url, logs, expired, heartbeats, handler, close };
+}
+
+const rawPost = (url: string, body: unknown, headers: Record<string, string> = {}) => fetch(`${url}/mcp`, { method: 'POST', body: JSON.stringify(body),
+  headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', ...headers } });
+
+test('POST without a session id that is not initialize: 400 missing initialization, one rate-limited log line, no server', async () => {
+  const h = await handlerHarness();
+  try {
+    const response = await rawPost(h.url, { jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    assert.equal(response.status, 400);
+    const body = await response.json() as { error: { code: number; message: string } };
+    assert.equal(body.error.code, -32000);
+    assert.equal(body.error.message, MISSING_INITIALIZATION);
+    assert.match(body.error.message, /missing initialization/);
+    assert.equal(h.handler.size, 0, 'no transport/server is created for it');
+    for (let i = 0; i < 5; i++) assert.equal((await rawPost(h.url, { jsonrpc: '2.0', id: i, method: 'tools/call' })).status, 400);
+    const lines = h.logs.filter(line => line.includes('missing initialization'));
+    assert.equal(lines.length, 1, `rate-limited per remote: ${JSON.stringify(h.logs)}`);
+    assert.match(lines[0]!, /POST without Mcp-Session-Id; json-rpc=yes, method=tools\/list, remote=127\.0\.0\.1/);
+    assert.ok(!h.logs.some(line => /Server not initialized|transport error/.test(line)), 'the SDK transport never sees it');
+    const garbage = await fetch(`${h.url}/mcp`, { method: 'POST', body: '{not json', headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' } });
+    assert.equal(garbage.status, 400);
+    assert.equal((await garbage.json() as { error: { code: number } }).error.code, -32700);
+    assert.equal(h.handler.size, 0);
+  } finally { await h.close(); }
+});
+
+test('a request with an unknown mcp-session-id gets 404 -32001 Session not found', async () => {
+  const h = await handlerHarness();
+  try {
+    const response = await rawPost(h.url, { jsonrpc: '2.0', id: 1, method: 'tools/list' }, { 'mcp-session-id': randomUUID(), 'mcp-protocol-version': '2025-06-18' });
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { jsonrpc: '2.0', error: { code: -32001, message: 'Session not found' }, id: null });
+    assert.equal(h.logs.filter(line => line.includes('404 unknown or expired MCP session')).length, 1);
+    assert.match(h.logs.find(line => line.includes('404'))!, /\(POST, remote=127\.0\.0\.1\); the client must re-initialize/);
+  } finally { await h.close(); }
+});
+
+test('a lost Hive lease unbinds once and hive_register works again on the same MCP session', { timeout: 10_000 }, async () => {
+  const h = await handlerHarness();
+  const client = new Client({ name: 'lease', version: '1.0.0' });
+  try {
+    const transport = new StreamableHTTPClientTransport(new URL(`${h.url}/mcp`));
+    await client.connect(transport);
+    const mcpSession = transport.sessionId!;
+    assert.ok(h.logs.some(line => line.includes(`session ${mcpSession} initialized (client=lease 1.0.0, protocol=`)), JSON.stringify(h.logs));
+    const first = payload(await client.callTool({ name: 'hive_register', arguments: { name: 'agent' } }));
+    h.expired.add(first.id);
+    // The next request heartbeats, fails, unbinds once; the tool then asks for hive_register.
+    const refused = await client.callTool({ name: 'hive_context', arguments: {} });
+    assert.equal(refused.isError, true);
+    assert.match(JSON.stringify(refused.content), /hive_register/);
+    await client.callTool({ name: 'hive_context', arguments: {} });
+    await new Promise(resolve => setTimeout(resolve, 100)); // several sweep ticks (streamHeartbeatMs: 20) with an open GET stream
+    const lost = h.logs.filter(line => line.includes(`lost Hive session ${first.id}`));
+    assert.equal(lost.length, 1, `logged once: ${JSON.stringify(h.logs)}`);
+    assert.match(lost[0]!, new RegExp(`session ${mcpSession} lost Hive session .*Unknown or expired session.*unbound, hive_register binds a new one`));
+    const beatsBefore = h.heartbeats.filter(id => id === first.id).length;
+    await new Promise(resolve => setTimeout(resolve, 60));
+    assert.equal(h.heartbeats.filter(id => id === first.id).length, beatsBefore, 'an unbound session is never heartbeated again');
+    const second = payload(await client.callTool({ name: 'hive_register', arguments: { name: 'agent' } }));
+    assert.notEqual(second.id, first.id);
+    assert.equal(transport.sessionId, mcpSession, 'the MCP session was kept');
+    assert.deepEqual(payload(await client.callTool({ name: 'hive_context', arguments: {} })), { ok: true });
+    assert.equal(h.logs.filter(line => line.includes('lost Hive session')).length, 1);
+  } finally { await client.close().catch(() => {}); await h.close(); }
+});
+
+test('after a daemon restart the SDK client gets 404 Session not found and a new Client.connect succeeds', { timeout: 60_000 }, async () => {
+  let { url, daemon } = await startDaemon();
+  const port = Number(new URL(url).port);
+  const clients: Client[] = [];
+  try {
+    const first = httpClient(url, ADMIN, 'restart'); clients.push(first.client);
+    await first.client.connect(first.transport);
+    payload(await first.client.callTool({ name: 'hive_register', arguments: { name: 'before restart' } }));
+    await stopDaemon(daemon);
+    ({ url, daemon } = await startDaemon(port));
+    // SDK 1.32.2 StreamableHTTPClientTransport.send() does NOT re-initialize on 404: it throws
+    // StreamableHTTPError(404) and keeps its stale session id (client/streamableHttp.js, send(): only 401/403 retry).
+    // Re-initialization is the caller's job: a new transport + Client.connect sends initialize without a session id.
+    await assert.rejects(first.client.callTool({ name: 'hive_context', arguments: {} }), (error: Error & { code?: number }) => {
+      assert.equal(error.code, 404); assert.match(error.message, /Session not found/); return true;
+    });
+    const second = httpClient(url, ADMIN, 'restart'); clients.push(second.client);
+    await second.client.connect(second.transport);
+    assert.ok(second.transport.sessionId && second.transport.sessionId !== first.transport.sessionId);
+    const registered = payload(await second.client.callTool({ name: 'hive_register', arguments: { name: 'after restart' } }));
+    assert.ok(registered.id);
+  } finally {
+    await Promise.all(clients.map(client => client.close().catch(() => {})));
+    await stopDaemon(daemon);
   }
 });

@@ -1,7 +1,60 @@
 # Client integration: what Hive sees, gates, and only observes
 
-Hive is one local daemon plus thin per-client adapters. Coverage differs by client and by
+Hive is one hub (daemon) plus thin per-client adapters. Coverage differs by client and by
 path. This page states it precisely; nothing here claims universal pre-write enforcement.
+
+## Setup with `hive-connect` (the supported path for teammates)
+
+`hive-connect connect --hub <hub>` (spec: `docs/superpowers/specs/2026-11-03-connect-cli-design.md`, sections
+1 and 4) pairs the laptop through the browser, keeps the connector credential in the OS keychain, and writes
+**token-free** client configuration. Every entry below calls the CLI, which reads the credential at run time.
+
+| Client | What `connect` writes | Hooks | MCP |
+|---|---|---|---|
+| Claude Code (`claude` on PATH or `~/.claude`) | `<repo>/.claude/settings.local.json` (added to `.git/info/exclude`), `<repo>/.mcp.json` | `hive-connect hook <event> --client claude` for SessionStart, UserPromptSubmit, PreToolUse and PostToolUse | stdio server `hive-connect mcp` |
+| Muse Code (`muse` on PATH or `~/.config/muse/settings.json`) | `mcp_servers.hive = {transport:'stdio', command:'hive-connect', args:['mcp'], mode:'optional'}` in `~/.config/muse/settings.json` (backed up first), entries in `<repo>/.muse/hooks.json` | same events, `--client muse`; format is a best guess (below) | stdio server `hive-connect mcp` |
+| Other MCP clients | nothing; prints the stdio command, and the HTTP alternative with a placeholder header | none | stdio or HTTP |
+
+Rules the CLI follows: merges are idempotent (running `connect` twice leaves identical files), other settings
+and other hooks are preserved, no token or secret is written to any file or environment block, and it never runs
+`claude mcp add` with a token. `hive-connect disconnect` removes exactly Hive's entries, stops the background
+node, revokes the credential on the hub (`connector_disconnect`) and deletes the keychain entry.
+
+**stdio bridge (`hive-connect mcp`).** One process per client session. It opens a Streamable HTTP MCP session to
+`<hub>/mcp` with the keychain credential and forwards `tools/list` and `tools/call`; one bridge process is one
+Hive session. The hub binds an MCP session to the token that created it, answers 400 to a request without an
+initialize and 404 to an unknown session id (tested in `tests/mcp-http.test.ts`).
+
+**Hooks via the CLI (`hive-connect hook <event>`).** Same behaviour as `src/hooks/hook.ts` (tables below), but the
+credential comes from the keychain instead of `HIVE_TOKEN` in a settings file.
+
+**Background node (`hive-connect node`).** Detached, pidfile under `~/.config/hive/nodes/`; on start, every 30 s and
+on (debounced) file changes it sends `checkout_report` (repo identity, branch, HEAD, dirty files with sha256) and
+`remote_push` of changed `.ts`/`.tsx` files. `--no-node` skips it; hooks still sync at prompt time.
+
+### Installing hive-connect before it is published
+
+`hive-connect` is not on npm yet (publishing is a human step: `cd cli && npm login && npm publish --access
+public`). Until then, from a clone of this repository, once the `cli/` package exists:
+
+```bash
+git clone https://github.com/Vishal2602/Hive-hack.git && cd Hive-hack/cli
+npm install            # installs the CLI's own dependency (the MCP SDK)
+npm install -g .       # puts hive-connect (and hive) on PATH, linked to this folder
+```
+
+Verified on 2026-11-03 with npm 10.9.8 using a probe package of the same shape: `npm install -g <folder>` alone
+links the bin **without** installing the folder's dependencies, so the bin fails at import; running `npm install`
+in the folder first, or installing a tarball (`npm pack` then `npm install -g ./hive-connect-<version>.tgz`),
+works. `npx github:Vishal2602/Hive-hack#master` only provides `hive-connect` if the **root** `package.json`
+declares that bin (npm cannot install a subfolder of a git repository); at the time of writing the root package
+has no `bin`, so that form is not available.
+
+### Older setup: `/connect.mjs`
+
+Hubs still serve `/connect.mjs` and `/hook.mjs` (the previous one-line setup). That path writes `HIVE_URL` and
+`HIVE_TOKEN` into `.claude/settings.local.json` and runs `claude mcp add` with the token; it never writes
+`MODEL_API_KEY`. Prefer `hive-connect`, which keeps the token out of files.
 
 ## Paths into Hive
 
@@ -42,6 +95,13 @@ Claude Code 2.x hook contract as understood at build time; `tests/hooks.test.ts`
 of it, not Claude Code itself.
 
 ## Muse Code (first demo client; NOT installed on the build machine)
+
+Verified vs assumed, in one place:
+- **Documented (Meta docs, fetched 2026-11-01):** settings path, `schema_version`, `mcp_servers` fields
+  (`transport`, `command`, `args`, `env`, `mode`), `MUSE_SESSION_ID`, project hooks file location, event names.
+- **Tested on our side:** the adapter's Muse output mode and payload capture (`tests/hooks.test.ts`).
+- **Assumed, not verified live:** the hook stdin JSON, the stdout/exit-code contract, whether `PreToolUse` can
+  block, the exact `hooks.json` entry format, and that Muse Code loads `hive-connect mcp` as written.
 
 Documented facts (dev.meta.ai/docs/muse-code/extending and /configuration, fetched 2026-11-01):
 user settings at `~/.config/muse/settings.json` with `"schema_version": 1`; MCP servers under

@@ -118,3 +118,96 @@ export function inviteProgress(input: InviteProgressInput): InviteProgress {
   const clientSeenAt = input.newToken && input.record ? input.record.lastUsedAt : null;
   return { sessionIds: ids, clientSeenAt, registered: ids.length > 0, revoked: Boolean(input.record?.revokedAt) };
 }
+
+// ---- Hive Connect (spec 2026-11-03, section 1) -------------------------------------------------------
+
+/** The one command a teammate runs inside their repository. Prefer /me.connect.cliCommand when the hub sends it. */
+export function connectCommand(hubUrl: string): string {
+  return `npx hive-connect connect --hub ${serviceBase(hubUrl)}`;
+}
+
+/** Per-client notes under the command: what `hive-connect connect` configures and what to do afterwards. */
+export const CLIENT_NOTES: Readonly<Record<ConnectClientId, { name: string; note: string }>> = {
+  'claude-code': { name: 'Claude Code', note: 'The command adds Hive hooks to .claude/settings.local.json and the Hive MCP server to .mcp.json in this repository. Neither file holds a token: the credential stays in your OS keychain. Start or restart Claude Code in that folder afterwards.' },
+  'muse-code': { name: 'Muse Code', note: 'The command adds a "hive" entry to ~/.config/muse/settings.json (after a backup) and hooks to .muse/hooks.json in the repository. The hooks format is a best guess; check it on your install.' },
+  mcp: { name: 'Other MCP client', note: 'The command prints the stdio server to add (hive-connect mcp, which reads the credential from your keychain) and the HTTP alternative with a placeholder header.' },
+};
+
+/**
+ * Token from what a person pastes on the approval page: a full invite link (token after "#token="),
+ * or a bare token (cleaned like the sign-in field). Empty string when nothing usable is there.
+ */
+export function tokenFromInvite(input: string): string {
+  const value = input.trim();
+  const hash = value.indexOf('#');
+  if (hash >= 0) {
+    const fragment = value.slice(hash + 1);
+    for (const part of fragment.split('&')) {
+      const [key, raw] = part.split('=');
+      if (key === 'token' && raw) {
+        try { return normalizePastedToken(decodeURIComponent(raw)); } catch { return normalizePastedToken(raw); }
+      }
+    }
+    return '';
+  }
+  return normalizePastedToken(value);
+}
+
+/** Internal app paths an invite link may continue to after signing in (`#token=…&next=/pair/CODE`). */
+export function safeNextPath(next: string | null | undefined): string | null {
+  if (!next) return null;
+  return /^\/[A-Za-z0-9/_-]{0,120}$/.test(next) && !next.startsWith('//') ? next : null;
+}
+
+export interface ConnectorLike {
+  tokenId: string;
+  member: string;
+  machine: string | null;
+  repoName: string | null;
+  branch: string | null;
+  headShort: string | null;
+  dirtyCount: number;
+  reportedAt: number | null;
+  createdAt: number;
+}
+export interface ConnectSessionLike { id: string; member?: string | null; tokenId?: string | null; connector?: unknown }
+
+export interface ConnectProgressInput {
+  /** Whose connection to follow; null follows anyone the caller can see. */
+  member: string | null;
+  /** Connectors and sessions that existed when waiting started; they do not count. */
+  baselineConnectorIds: readonly string[];
+  baselineSessionIds: readonly string[];
+  connectors: readonly ConnectorLike[];
+  sessions: readonly ConnectSessionLike[];
+}
+
+export interface ConnectProgress {
+  /** The connector this flow follows: a new pairing, or the credential a new connected session used (reconnect). */
+  connector: ConnectorLike | null;
+  /** The connector sent its first checkout report (repository, branch, HEAD, local changes). */
+  reported: boolean;
+  /** First new session registered through a connector credential. */
+  sessionId: string | null;
+  /** 0 nothing yet, 1 approved, 2 repository reported, 3 agent registered. */
+  done: 0 | 1 | 2 | 3;
+}
+
+/** Progress of "run one command": approval creates a connector, the node reports the checkout, the agent registers. */
+export function connectProgress(input: ConnectProgressInput): ConnectProgress {
+  const forMember = <T extends { member?: string | null }>(item: T) => input.member === null || item.member === input.member;
+  const baseConnectors = new Set(input.baselineConnectorIds);
+  const baseSessions = new Set(input.baselineSessionIds);
+  const visible = input.connectors.filter(forMember);
+  const connectorIds = new Set(visible.map(c => c.tokenId));
+  const fresh = visible.filter(c => !baseConnectors.has(c.tokenId)).sort((a, b) => b.createdAt - a.createdAt);
+  // A new session counts when it came through a connector credential: one of the listed connectors, or carrying checkout info.
+  const sessions = input.sessions.filter(s => !baseSessions.has(s.id) && forMember(s)
+    && ((s.tokenId != null && connectorIds.has(s.tokenId)) || s.connector != null));
+  const connector = fresh[0] ?? visible.find(c => sessions.some(s => s.tokenId === c.tokenId)) ?? null;
+  const session = (connector && sessions.find(s => s.tokenId === connector.tokenId)) ?? sessions[0] ?? null;
+  const reported = Boolean(connector && connector.reportedAt !== null);
+  const sessionId = session?.id ?? null;
+  const done = sessionId ? 3 : reported ? 2 : connector ? 1 : 0;
+  return { connector, reported, sessionId, done };
+}

@@ -226,3 +226,45 @@ hub, which compiles the combination.
    label any replay as scripted.
 5. Stretch only after that: `rename_symbol`, `add_endpoint`, more claim kinds, SSE for the dashboard.
 
+
+## Docs restructure for Hive Connect (2026-11-03, spec section 5)
+- `README.md` is now public-user first: what Hive does, "Join a workspace" (invite link + `hive-connect connect
+  --hub <hub>`), what you will see, supported clients, FAQ (no Meta key and no backend needed on laptops), then
+  links. Maintainer material moved to `docs/SELF_HOSTING.md` (install, dashboard build, env table incl.
+  `HIVE_PUBLIC_URL` and `HIVE_MODEL_PROXY_URL`, admin token and roles, Railway, first-boot clone, volume,
+  `model_diagnose`, the CONNECT proxy and a minimal Cloudflare Worker pass-through, laptop relay as operator
+  fallback, upgrades and backups). `docs/DEPLOY.md` is a pointer. New `docs/DEMO.md` (seed script + the three
+  playground agent tasks). `docs/CLIENTS.md` gains the CLI setup, stdio bridge, CLI hooks and a Muse Code
+  verified-vs-assumed list. `TEAMMATE_START_HERE.md` section 11 covers hive-connect and publishing.
+- Checked while writing: `npm install -g <folder>` does not install that folder's dependencies (probe package,
+  npm 10.9.8); `npm install` in the folder first, or a packed tarball, works. The root `package.json` has no
+  `bin`, so `npx github:Vishal2602/Hive-hack` does not provide `hive-connect`.
+- Not verified / pending: the `cli/` package was not in the tree when these docs were written (the docs describe
+  the spec's contract for it); npm publishing (human); a public hub URL; the dashboard Diagnose control;
+  Cloudflare Worker and proxy options against the real Meta API; Muse Code live; two-person run.
+
+## Hive Connect acceptance and release checks (2026-11-03, spec section 6)
+- `tests/acceptance-two-users.test.ts` (in `npm test`, ~2 s): one spawned hub (temp file DB in `HIVE_DATA_DIR`,
+  `HIVE_PROJECT_ROOT` = temp clone of `../hive-playground`, random port); two users (`ana`, `ben`) with separate
+  `HOME`/`XDG_CONFIG_HOME` and separate clones; admin creates two member invite tokens; each user runs
+  `cli/dist/main.js connect --hub --no-browser --yes --client claude` with `HIVE_CONNECT_NO_KEYCHAIN=1`, pairing
+  approved with that user's browser token (`pair_approve`). Asserts: credentials.json mode 0600 with one connector
+  credential; `.mcp.json` (token-free stdio `hive-connect mcp`) and `.claude/settings.local.json` hooks written and
+  excluded from git; reconnect reuses the credential and leaves both files byte-identical; both connectors in
+  `member_list` with branch/head; two MCP clients through the stdio bridge register (members ana/ben); `/api/view`
+  lists both members with `branch@head`; colliding intents (cents vs dollars) give `assumption_mismatch` in
+  `hive_context` for both; `hook prompt --client claude` for ben (fake stdin) puts the finding in
+  `additionalContext`; ben's new intent (getPrice cents) removes the mismatch; ana's `disconnect` revokes the
+  credential (`/me` 401, ben still 200), removes the created config files, credential and connection.
+- `scripts/acceptance-live.ts` (opt-in, not in `npm test`; spends Claude usage): same setup, then two real
+  `claude -p` sessions (`--mcp-config <clone>/.mcp.json --strict-mcp-config`, stream-json, hook events) with the
+  README pricing and invoice tasks; writes a redacted trace to `acceptance/trace-<ts>.json` (git-ignored) and prints
+  a table. Only `--dry-run` was run (bridge spawned exactly as `.mcp.json` says lists 16 hive tools per user).
+- Release checks: see VERIFICATION.md "Hive Connect release checks".
+- Hosted hub: `https://hive-hack-production.up.railway.app` runs commit `b22bea0` (Railpack builds the dashboard via the
+  root `build` script). Verified against it on 2026-11-03: dashboard routes, the real CLI connect/status/bridge
+  (16 tools)/disconnect round trip, and admin `model_diagnose` (verdict `no_models_for_host`, request ids in
+  VERIFICATION.md "Hosted hub checks").
+- Remaining: `npm publish` of `cli/` (human); Muse Code live session; a real two-agent run
+  (`node --disable-warning=ExperimentalWarning scripts/acceptance-live.ts`); Meta accepting the Railway host (or an
+  accepted egress via `HIVE_MODEL_PROXY_URL`) before hub-side model analysis works.

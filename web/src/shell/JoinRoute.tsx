@@ -1,7 +1,9 @@
 // /join#token=... Invite links carry the token in the fragment, which is never sent to the server.
-// The token is moved to sessionStorage, the fragment is removed from history, and the person lands signed in.
+// The token is moved to sessionStorage, the fragment is removed from history, and the person lands signed in
+// (on `next` when the fragment names an app path, e.g. #token=…&next=/pair/ABCD2345).
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { safeNextPath } from '@/screens/connect/logic';
 import { Page } from './Page';
 import { useMock } from './store';
 import { Standalone } from './Standalone';
@@ -12,7 +14,11 @@ export function JoinRoute() {
   const [error, setError] = useState<string | null>(null);
 
   // Read the fragment once; StrictMode may run the effect twice, so the token is captured in state.
-  const [token] = useState(() => new URLSearchParams(window.location.hash.replace(/^#/, '')).get('token'));
+  const [{ token, next }] = useState(() => {
+    const params = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    // Optional `next` (an app path such as /pair/ABCD2345) continues there after signing in.
+    return { token: params.get('token'), next: safeNextPath(params.get('next')) };
+  });
 
   useEffect(() => {
     // Drop the fragment from history (the app is served under BASE_URL, /ui/).
@@ -24,11 +30,11 @@ export function JoinRoute() {
     let cancelled = false;
     void signIn(token).then(result => {
       if (cancelled) return;
-      if (result.ok) navigate('/', { replace: true });
+      if (result.ok) navigate(next ?? '/', { replace: true });
       else setError(result.reason);
     });
     return () => { cancelled = true; };
-  }, [token, signIn, navigate]);
+  }, [token, next, signIn, navigate]);
 
   return (
     <Standalone>

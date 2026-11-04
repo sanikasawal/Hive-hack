@@ -11,6 +11,7 @@ import Agreements from '@/screens/Agreements';
 import Connect from '@/screens/Connect';
 import Members from '@/screens/Members';
 import Overview from '@/screens/Overview';
+import Pair from '@/screens/Pair';
 import SignIn from '@/screens/SignIn';
 
 export default function App() {
@@ -20,6 +21,8 @@ export default function App() {
           <Routes>
             <Route path="/signin" element={<SignIn />} />
             <Route path="/join" element={<JoinRoute />} />
+            {/* Hive Connect approval: standalone, so a tab the CLI opened can sign in with an invite link first. */}
+            <Route path="/pair/:code" element={<Pair />} />
             <Route element={<AppShell />}>
               <Route index element={<Overview />} />
               <Route path="connect" element={<Connect />} />

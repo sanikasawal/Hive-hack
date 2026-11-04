@@ -1,63 +1,72 @@
-// /connect: invite a teammate in three steps. Workspace, then a personal token and client config, then a live
-// checklist that ticks when their first agent registers.
-import { useState } from 'react';
+// /connect: the Hive Connect product flow (spec 2026-11-03, section 1).
+// 1 Invite: admins create a member invite link; members see their own. 2 Run one command: `npx hive-connect
+// connect --hub <hub>` inside the repository. 3 Waiting: ticks as the pairing is approved, the checkout is
+// reported and the first agent registers. The hand-configured token path stays behind a disclosure for admins.
+import { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { AnimatePresence, motion, useReducedMotion, type HTMLMotionProps } from 'motion/react';
 import { Lock } from 'lucide-react';
-import { Button } from '@/components/arc/button/button';
+import { Accordion } from '@/components/arc/accordion/accordion';
 import { EmptyState } from '@/components/arc/empty-state/empty-state';
 import { motionTokens } from '@/components/arc/lib/motion-tokens';
 import { Stepper } from '@/components/arc/stepper/stepper';
 import { Page, useHive } from '@/shell';
+import { AdvancedToken } from './connect/AdvancedToken';
+import { CommandStep } from './connect/CommandStep';
 import { InviteStep } from './connect/InviteStep';
-import { WaitingStep } from './connect/WaitingStep';
-import { WorkspaceStep } from './connect/WorkspaceStep';
-import type { ConnectClientId } from './connect/logic';
-import { useInviteProgress, type Invite } from './connect/shared';
+import { WaitingStep, type WaitBaseline } from './connect/WaitingStep';
+import { connectCommand, serviceBase, type ConnectClientId } from './connect/logic';
+import { connectorsOf, type CreatedInvite } from './connect/shared';
 import styles from './connect/Connect.module.css';
 
 type Step = 0 | 1 | 2;
+const STEP_PARAM: Record<string, Step> = { invite: 0, command: 1, waiting: 2 };
+const STEP_NAME = ['invite', 'command', 'waiting'] as const;
+const EMPTY_BASELINE: WaitBaseline = { connectorIds: [], sessionIds: [] };
 
 export default function Connect() {
-  const { me } = useHive();
+  const { me, identity, workspace, status, memberSummaries, snapshot } = useHive();
   const reduced = useReducedMotion() ?? false;
-  const [step, setStep] = useState<Step>(0);
-  const [invite, setInvite] = useState<Invite | null>(null);
+  const [params, setParams] = useSearchParams();
+  const step: Step = STEP_PARAM[params.get('step') ?? ''] ?? 0;
+  const setStep = (next: Step) => setParams(next === 0 ? {} : { step: STEP_NAME[next] }, { replace: true });
+  const [invite, setInvite] = useState<CreatedInvite | null>(null);
   const [client, setClient] = useState<ConnectClientId>('claude-code');
 
+  // What already existed when this page opened; step 3 counts only what appears after it.
+  const [baseline, setBaseline] = useState<WaitBaseline | null>(null);
+  useEffect(() => {
+    if (baseline === null && status === 'ready') {
+      setBaseline({ connectorIds: connectorsOf(memberSummaries).map(c => c.tokenId), sessionIds: snapshot.sessions.map(s => s.id) });
+    }
+  }, [baseline, status, memberSummaries, snapshot.sessions]);
+
   const isAdmin = me?.role === 'admin';
-  const isViewer = me?.role === 'viewer';
-  const { registered } = useInviteProgress(invite);
+  const hubUrl = serviceBase(identity?.hubUrl ?? workspace.cloudLink);
+  const command = identity?.connect?.cliCommand ?? connectCommand(hubUrl);
+  // Follow the teammate invited on this visit; members follow themselves; an admin without an invite follows anyone.
+  const follow = invite?.memberName ?? (isAdmin ? null : me?.name ?? null);
+  const person = invite?.memberName ?? null;
 
-  const steps = [
-    { id: 'workspace', label: 'Workspace', description: 'Check the cloud link' },
-    { id: 'invite', label: isAdmin ? 'Invite' : 'Your client', description: 'Token and client setup' },
-    { id: 'waiting', label: 'First agent', description: 'Wait for it to register' },
-  ];
-  const current = step === 2 && registered ? 3 : step;
-
-  function startOver() {
-    setInvite(null);
-    setStep(1);
-  }
-
-  const title = isAdmin ? 'Invite a teammate' : 'Connect an agent';
-  const description = isAdmin
-    ? 'Share the cloud link and a personal token. Their agent appears here the moment it registers, wherever they are working from.'
-    : 'Point your own coding agent at this workspace with the ready-made config for your client.';
-
-  if (isViewer) {
+  if (me?.role === 'viewer') {
     return (
-      <Page title="Connect an agent" width="narrow">
+      <Page title="Connect a repository" width="narrow">
         <div className={styles.panel}>
           <EmptyState
             icon={<Lock size={20} />}
-            title="Viewers cannot connect agents"
-            description="Your token lets you read this workspace. Ask an admin for a member token if you want your agent to join."
+            title="Viewers cannot connect repositories"
+            description="Your token lets you read this workspace. Ask an admin for a member invite link if you want your agent to join."
           />
         </div>
       </Page>
     );
   }
+
+  const steps = [
+    { id: 'invite', label: 'Invite', description: isAdmin ? 'Create an invite link' : 'Your invite link' },
+    { id: 'command', label: 'Run one command', description: 'Inside the repository' },
+    { id: 'waiting', label: 'Waiting', description: 'Approve, report, register' },
+  ];
 
   const enterEase = [...motionTokens.ease.enter] as [number, number, number, number];
   const exitEase = [...motionTokens.ease.exit] as [number, number, number, number];
@@ -70,40 +79,34 @@ export default function Connect() {
       };
 
   return (
-    <Page title={title} description={description} width="narrow">
+    <Page
+      title={isAdmin ? 'Invite a teammate' : 'Connect your repository'}
+      description={isAdmin
+        ? 'Send an invite link. They run one command in the repository they already have, approve it in the browser, and their agent appears here.'
+        : 'Run one command in the repository you already work in, approve it in the browser, and your agent appears here.'}
+      width="narrow"
+    >
       <div className={styles.flow}>
-        <Stepper
-          steps={steps}
-          current={current}
-          onStepSelect={(index) => setStep(index as Step)}
-          details="current"
-          label="Invite progress"
-          completeLabel="Agent connected"
-        />
+        <Stepper steps={steps} current={step} onStepSelect={(index) => setStep(index as Step)} details="current" label="Connect progress" />
         <AnimatePresence mode="wait" initial={false}>
           <motion.div key={step} {...motionProps}>
-            {step === 0 && <WorkspaceStep canInvite={isAdmin} onContinue={() => setStep(1)} />}
+            {step === 0 && (
+              <InviteStep hubUrl={hubUrl} invite={invite} onCreated={setInvite} onReset={() => setInvite(null)} onContinue={() => setStep(1)} />
+            )}
             {step === 1 && (
-              <InviteStep
-                invite={invite}
-                client={client}
-                onClientChange={setClient}
-                onCreated={setInvite}
-                onStartOver={startOver}
-                onBack={() => setStep(0)}
-                onContinue={() => setStep(2)}
-              />
+              <CommandStep command={command} hubUrl={hubUrl} person={person} client={client} onClientChange={setClient}
+                onBack={() => setStep(0)} onContinue={() => setStep(2)} />
             )}
             {step === 2 && (
-              <WaitingStep invite={invite} client={client} onGoToInvite={() => setStep(1)} onInviteAnother={startOver} />
+              <WaitingStep baseline={baseline ?? EMPTY_BASELINE} member={follow}
+                onBack={() => setStep(1)} onStartOver={() => { setInvite(null); setStep(0); }} />
             )}
           </motion.div>
         </AnimatePresence>
-        {step === 0 && invite && (
-          <p className={styles.muted}>
-            {invite.secret !== null ? `You have an unsent token for ${invite.memberName}. ` : 'Your client setup is still open. '}
-            <Button variant="ghost" size="sm" onClick={() => setStep(1)}>Return to it</Button>
-          </p>
+        {isAdmin && (
+          <div className={styles.advancedWrap}>
+            <Accordion defaultOpen={-1} items={[{ title: 'Advanced: a token for a client configured by hand', content: <AdvancedToken hubUrl={hubUrl} /> }]} />
+          </div>
         )}
       </div>
     </Page>

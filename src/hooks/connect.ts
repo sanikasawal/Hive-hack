@@ -4,6 +4,8 @@
  * It checks the token, installs the Hive hook into .hive/, adds the hooks and HIVE_URL/HIVE_TOKEN to
  * .claude/settings.local.json (kept out of git via .git/info/exclude), and adds Hive as an MCP server
  * for this project with `claude mcp add`. It never edits tracked files.
+ * It never writes MODEL_API_KEY: the model credential stays on the hub. (The laptop relay is an operator
+ * fallback that reads the key from the environment at run time only.)
  */
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -26,10 +28,15 @@ function git(args: string[]): string | null {
 }
 type HookEntry = { matcher?: string; hooks: { type: string; command: string; timeout?: number }[] };
 
-/** Settings with Hive's hooks and env merged in; other hooks and settings are kept as they are. */
-export function mergeSettings(existing: Record<string, unknown>, hub: string, secret: string, modelKey?: string): Record<string, unknown> {
+/**
+ * Settings with Hive's hooks and env merged in; other hooks and settings are kept as they are. A MODEL_API_KEY that an
+ * earlier Hive setup stored here is removed: the model credential belongs on the hub only.
+ */
+export function mergeSettings(existing: Record<string, unknown>, hub: string, secret: string): Record<string, unknown> {
   const settings = { ...existing };
-  settings.env = { ...(existing.env as Record<string, string> | undefined ?? {}), HIVE_URL: hub, HIVE_TOKEN: secret, ...(modelKey ? { MODEL_API_KEY: modelKey } : {}) };
+  const env: Record<string, string> = { ...(existing.env as Record<string, string> | undefined ?? {}), HIVE_URL: hub, HIVE_TOKEN: secret };
+  delete env.MODEL_API_KEY;
+  settings.env = env;
   const hooks = { ...(existing.hooks as Record<string, HookEntry[]> | undefined ?? {}) };
   for (const { event, arg, matcher, timeout } of HOOK_EVENTS) {
     const kept = (hooks[event] ?? []).filter(entry => !entry.hooks?.some(h => h.command.includes('hive-hook.mjs')));
@@ -63,9 +70,8 @@ async function main(): Promise<void> {
     try { existing = JSON.parse(readFileSync(settingsPath, 'utf8')) as Record<string, unknown>; }
     catch { fail(`${settingsPath} is not valid JSON; fix or remove it and run again`); }
   }
-  // Optional: MODEL_API_KEY set while running setup lets `node .hive/hive-hook.mjs analyze` relay Muse Spark calls from this laptop.
-  const modelKey = process.env.MODEL_API_KEY?.trim() || undefined;
-  writeFileSync(settingsPath, `${JSON.stringify(mergeSettings(existing, HUB, token, modelKey), null, 2)}\n`);
+  const hadModelKey = Boolean((existing.env as Record<string, unknown> | undefined)?.MODEL_API_KEY);
+  writeFileSync(settingsPath, `${JSON.stringify(mergeSettings(existing, HUB, token), null, 2)}\n`);
 
   // Keep the token and hook out of commits without touching the tracked .gitignore.
   const exclude = git(['rev-parse', '--git-path', 'info/exclude']);
@@ -86,8 +92,7 @@ async function main(): Promise<void> {
   console.log(`- Claude Code hooks and HIVE_URL/HIVE_TOKEN: ${settingsPath} (not committed)`);
   console.log(mcpOk ? '- Hive MCP tools added for this project (claude mcp add).'
     : `- Could not run "claude mcp add" (${mcp.error ? 'claude not found' : mcp.stderr.trim().split('\n')[0]}). Run it yourself:\n  claude mcp add --scope local --transport http hive ${HUB}/mcp --header "Authorization: Bearer <token>"`);
-  console.log(modelKey ? '- MODEL_API_KEY stored for this project, so this laptop can relay Muse Spark calls (node .hive/hive-hook.mjs analyze).'
-    : '- No MODEL_API_KEY given: this laptop will not relay Muse Spark calls (re-run with MODEL_API_KEY=<key> to enable).');
+  if (hadModelKey) console.log(`- Removed MODEL_API_KEY from ${settingsPath}: the model key stays on the Hive hub, not on laptops.`);
   console.log('Start (or restart) Claude Code in this folder. Your edits to .ts/.tsx files are now checked against your teammates\' work.');
 }
 

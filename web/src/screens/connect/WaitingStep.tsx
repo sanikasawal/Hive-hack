@@ -1,171 +1,107 @@
-// Step 3: a live checklist that follows the token until an agent registers with it. Live data only: the store
-// polls /snapshot every 2 s, and a session whose tokenId equals the followed token ticks the last step.
-// The simulate control exists only with ?mock=1 (prototype data).
-import { useEffect, useRef, useState } from 'react';
+// Step 3, Waiting. Follows the command from step 2 on live data: a new connector appears in member_list once the
+// pairing is approved, its checkout report fills in branch, HEAD and local changes, and the first session through
+// a connector credential ticks the last row. Baselines are taken when the Connect page opened, so older
+// connectors and sessions do not count.
+import { useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Hourglass } from 'lucide-react';
 import { Alert } from '@/components/arc/alert/alert';
 import { Button } from '@/components/arc/button/button';
-import { EmptyState } from '@/components/arc/empty-state/empty-state';
 import { Stepper, type StepperStep } from '@/components/arc/stepper/stepper';
-import { formatClock, useHive, useLastPoll } from '@/shell';
-import { clientById, type ConnectClientId } from './logic';
-import { useInviteProgress, type Invite } from './shared';
+import { formatClock, formatRelative, useHive, useLastPoll, useNow } from '@/shell';
+import { connectProgress } from './logic';
+import { connectorsOf } from './shared';
 import styles from './Connect.module.css';
 
+/** member_list refreshes every 10 s by default; while waiting it refreshes this often. */
+const ACCESS_REFRESH_WHILE_WAITING_MS = 3000;
+
+export interface WaitBaseline { connectorIds: string[]; sessionIds: string[] }
+
 interface WaitingStepProps {
-  invite: Invite | null;
-  client: ConnectClientId;
-  onGoToInvite: () => void;
-  onInviteAnother: () => void;
+  baseline: WaitBaseline;
+  /** Whose connection to follow (an invited teammate or the signed-in member); null follows anyone visible. */
+  member: string | null;
+  onBack: () => void;
+  onStartOver: () => void;
 }
 
-/** Admins refresh token metadata (last used, revoked) this often while waiting, instead of every 10 s. */
-const ACCESS_REFRESH_WHILE_WAITING_MS = 4000;
-/** Delay between the simulated client handshake and the agent registering, so each row visibly ticks. */
-const SIMULATED_REGISTER_DELAY_MS = 1400;
-
-export function WaitingStep({ invite, client, onGoToInvite, onInviteAnother }: WaitingStepProps) {
-  const { connection, registerAgent, sessionName, me, mode, canSimulateAgents, refresh } = useHive();
+export function WaitingStep({ baseline, member, onBack, onStartOver }: WaitingStepProps) {
+  const { connection, memberSummaries, snapshot, sessionName, mode, refresh, me } = useHive();
   const { lastPollAt } = useLastPoll();
+  const now = useNow(5000);
   const navigate = useNavigate();
-  const progress = useInviteProgress(invite);
-  const [handshakeAt, setHandshakeAt] = useState<number | null>(null);
-  const timer = useRef<number | null>(null);
-  const isAdmin = me?.role === 'admin';
-  const waiting = Boolean(invite) && !progress.registered && !progress.revoked;
+  const offline = connection === 'offline';
 
-  useEffect(() => () => { if (timer.current !== null) window.clearTimeout(timer.current); }, []);
+  const progress = useMemo(() => connectProgress({
+    member, baselineConnectorIds: baseline.connectorIds, baselineSessionIds: baseline.sessionIds,
+    connectors: connectorsOf(memberSummaries), sessions: snapshot.sessions,
+  }), [member, baseline, memberSummaries, snapshot.sessions]);
+  const finished = progress.done === 3;
 
   useEffect(() => {
-    if (mode !== 'live' || !isAdmin || !waiting) return;
+    if (mode !== 'live' || finished) return;
     void refresh({ access: true });
     const id = window.setInterval(() => { void refresh({ access: true }); }, ACCESS_REFRESH_WHILE_WAITING_MS);
     return () => window.clearInterval(id);
-  }, [mode, isAdmin, waiting, refresh]);
+  }, [mode, finished, refresh]);
 
-  if (!invite) {
-    return (
-      <div className={styles.panel}>
-        <EmptyState
-          icon={<Hourglass size={20} />}
-          title="Nothing to wait for yet"
-          description="Set up a token on the previous step first. This page then follows the first agent that uses it."
-          action={<Button onClick={onGoToInvite}>Go to the token step</Button>}
-        />
-      </div>
-    );
-  }
-
-  const clientName = clientById(client).name;
-  const offline = connection === 'offline';
-  const firstSessionId = progress.sessionIds[0];
-  const agentName = firstSessionId ? sessionName(firstSessionId) : null;
-  const clientSeenAt = progress.clientSeenAt ?? handshakeAt;
-  const self = invite.own;
-  const possessive = self ? 'your' : `${invite.memberName}'s`;
-  const untracked = invite.tokenId === null;
-
-  const reachable = !offline;
-  const agentDone = reachable && progress.registered;
-  // A new token's first use is visible to admins (token_list lastUsedAt). Your own token is used by this page
-  // too, so for it the client row ticks together with the agent.
-  const clientDone = reachable && (agentDone || (invite.secret !== null && clientSeenAt !== null));
-  const current = !reachable ? 0 : !clientDone ? 1 : !agentDone ? 2 : 3;
+  const who = member === null || member === me?.name ? null : member;
+  const possessive = who ? `${who}'s` : 'your';
+  const c = progress.connector;
+  const where = c ? [c.repoName, c.machine].filter(Boolean).join(' on ') : '';
+  const checkout = c && c.reportedAt !== null
+    ? `${c.branch ?? 'detached HEAD'}${c.headShort ? `@${c.headShort}` : ''}, ${c.dirtyCount === 0 ? 'no local changes' : `${c.dirtyCount} local ${c.dirtyCount === 1 ? 'change' : 'changes'}`}. Reported ${formatRelative(c.reportedAt, now)}.`
+    : null;
+  const agent = progress.sessionId ? sessionName(progress.sessionId) : null;
 
   const steps: StepperStep[] = [
     {
-      id: 'server',
-      label: 'Server reachable',
-      description: reachable ? `Hive answered at ${formatClock(lastPollAt)}.` : 'Checking the cloud link.',
-      error: offline ? 'Hive is not answering on its cloud link. Waiting resumes when it is back.' : undefined,
+      id: 'hub', label: 'Hub reachable',
+      description: offline ? undefined : `Hive answered at ${formatClock(lastPollAt)}.`,
+      error: offline ? 'Hive is not answering. Waiting resumes when it is back.' : undefined,
     },
     {
-      id: 'client',
-      label: `${clientName} configured`,
-      description: clientDone && clientSeenAt !== null && invite.secret !== null
-        ? `The token was first used at ${formatClock(clientSeenAt)}.`
-        : clientDone
-          ? `${clientName} reached Hive with the token.`
-          : invite.secret !== null
-            ? `Ticks the first time ${clientName} uses the new token.`
-            : `Ticks when ${clientName} registers an agent, since this page also uses your token.`,
+      id: 'approved', label: 'Approved in the browser',
+      description: c ? `Connected${where ? ` ${where}` : ''}${member === null ? ` as ${c.member}` : ''}.` : 'Ticks when the code from the terminal is approved on its approval page.',
     },
     {
-      id: 'agent',
-      label: 'First agent registered',
-      description: agentDone && agentName ? `${agentName} registered.` : 'Ticks when an agent registers with this token and starts its lease.',
+      id: 'reported', label: 'Repository reported',
+      description: checkout ?? 'Ticks when the background reporter sends the branch, HEAD and local changes.',
+    },
+    {
+      id: 'agent', label: 'First agent registered',
+      description: agent ? `${agent} registered.` : 'Ticks when the coding client starts in that folder and registers through the connection.',
     },
   ];
-
-  function simulate() {
-    if (offline || timer.current !== null || !invite?.tokenId) return;
-    const tokenId = invite.tokenId;
-    setHandshakeAt(Date.now());
-    timer.current = window.setTimeout(() => {
-      timer.current = null;
-      registerAgent(tokenId, `${clientName} agent`, client);
-    }, SIMULATED_REGISTER_DELAY_MS);
-  }
+  const current = offline ? 0 : 1 + progress.done;
 
   return (
     <div className={styles.panel}>
       <div className={styles.waitHead}>
-        <h2 className={styles.waitTitle}>
-          {agentDone ? `${self ? 'Your' : `${invite.memberName}'s`} agent is connected` : `Waiting for ${possessive} agent`}
-        </h2>
-        {!agentDone && !progress.revoked && (
+        <h2 className={styles.waitTitle}>{finished ? `${who ? `${who}'s` : 'Your'} agent is connected` : `Waiting for ${possessive} terminal`}</h2>
+        {!finished && (
           <p className={styles.live} role="status">
             {!offline && <span className={styles.pulse} aria-hidden="true" />}
-            {offline ? 'Paused while Hive is unreachable.' : 'This page updates on its own. You can leave it open while they set up.'}
+            {offline ? 'Paused while Hive is unreachable.' : 'This page updates on its own. Leave it open while they run the command.'}
           </p>
         )}
       </div>
 
-      {untracked && (
-        <Alert tone="info" title="This token cannot be followed">
-          You are signed in with the operator token, which has no token record. Agents using it still appear on the overview.
+      <Stepper orientation="vertical" steps={steps} current={Math.min(current, steps.length)} label={`Connection checklist for ${possessive} agent`} completeLabel="Agent connected" />
+
+      {finished && (
+        <Alert tone="success" title={`${agent ?? 'The agent'} is on the overview`}>
+          Its intent, branch and local changes show up there. Hive checks its work against everyone else's from now on.
         </Alert>
       )}
-
-      {progress.revoked ? (
-        <Alert tone="danger" title="This token was revoked">
-          No agent can register with it. Create a new token to try again.
-        </Alert>
-      ) : (
-        <Stepper
-          orientation="vertical"
-          steps={steps}
-          current={current}
-          label={`Connection checklist for ${possessive} agent`}
-          completeLabel="Agent connected"
-        />
-      )}
-
-      {agentDone && (
-        <Alert tone="success" title={`${agentName ?? 'The agent'} is on the overview`}>
-          Its intent, progress and lease show up there. Hive starts checking its work against everyone else's from now on.
-        </Alert>
-      )}
-
-      {!agentDone && !progress.revoked && canSimulateAgents && mode === 'mock' && invite.tokenId && (
-        <div className={styles.devBox}>
-          <div className={styles.devText}>
-            <span className={styles.devTitle}>Prototype data</span>
-            <span className={styles.muted}>Pretends the client uses the token, then registers an agent a moment later.</span>
-          </div>
-          <Button variant="secondary" size="sm" onClick={simulate} disabled={offline || handshakeAt !== null}>
-            Simulate agent registering
-          </Button>
-        </div>
+      {!finished && progress.done === 2 && (
+        <p className={styles.muted}>Almost there: start or restart the coding client in that repository folder.</p>
       )}
 
       <div className={styles.actions}>
-        {!progress.revoked ? <Button variant="ghost" onClick={onInviteAnother}>{isAdmin ? 'Invite someone else' : 'Start over'}</Button> : <span />}
+        <Button variant="ghost" onClick={finished ? onStartOver : onBack}>{finished ? 'Connect another' : 'Back to the command'}</Button>
         <div className={styles.actionsEnd}>
-          {progress.revoked
-            ? <Button onClick={onInviteAnother}>Create a new token</Button>
-            : <Button variant={agentDone ? 'primary' : 'secondary'} onClick={() => navigate('/')}>Go to overview</Button>}
+          <Button variant={finished ? 'primary' : 'secondary'} onClick={() => navigate('/')}>Go to overview</Button>
         </div>
       </div>
     </div>

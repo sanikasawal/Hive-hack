@@ -137,7 +137,7 @@ function ModelLine({ model, now }: { model: ModelView; now: number }) {
         formatRelative(a.at, now),
       ].filter(Boolean);
       return <>
-        Explained by {MODEL_NAME} <code>{a.model ?? 'unknown model'}</code>. {bits.join(' · ')}.
+        Explained by {MODEL_NAME} <code>{a.model ?? 'unknown model'}</code>{a.relayedBy ? `, relayed from ${a.relayedBy}'s machine` : ''}. {bits.join(' · ')}.
         {FRESHNESS[model.freshness](a.revision)}
       </>;
     }
@@ -145,7 +145,7 @@ function ModelLine({ model, now }: { model: ModelView; now: number }) {
       const a = model.analysis;
       const count = model.findings === 1 ? '1 finding' : `${model.findings} findings`;
       return <>
-        {MODEL_NAME} <code>{a.model ?? 'unknown model'}</code> reported {count} {formatRelative(a.at, now)}
+        {MODEL_NAME} <code>{a.model ?? 'unknown model'}</code>{a.relayedBy ? `, relayed from ${a.relayedBy}'s machine,` : ''} reported {count} {formatRelative(a.at, now)}
         {a.summary.trim() ? <>: <span>{a.summary}</span></> : '.'} Model details are not shared with viewers.
         {FRESHNESS[model.freshness](a.revision)}
       </>;

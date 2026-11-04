@@ -1,9 +1,11 @@
 // A member: name, role, last activity, the agents their tokens registered, and the tokens themselves.
 import { Avatar } from '@/components/arc/avatar/avatar';
 import { Badge } from '@/components/arc/badge/badge';
+import type { ConnectorSummary } from '@/api';
 import { formatDateTime, formatRelative } from '@/shell';
 import { ROLE_LABEL } from '@/mock';
 import type { MemberRow } from './access';
+import { ConnectorRow } from './ConnectorRow';
 import { clientName } from './model';
 import { TokenRow } from './TokenRow';
 import styles from './members.module.css';
@@ -13,6 +15,12 @@ interface MemberSectionProps {
   manageable: boolean;
   offline: boolean;
   now: number;
+  /** Active Hive Connect credentials of this member (member_list). */
+  connectors?: ConnectorSummary[];
+  /** May disconnect them: admins, or the member themself. */
+  canDisconnect?: boolean;
+  /** Display names of sessions by token id, for "agents through this connector". */
+  agentsByToken?: Record<string, string[]>;
 }
 
 function statusText(row: MemberRow, now: number): string {
@@ -28,7 +36,7 @@ function emptyTokensText(row: MemberRow): string {
   return 'No tokens listed. Invite them again to generate one.';
 }
 
-export function MemberSection({ row, manageable, offline, now }: MemberSectionProps) {
+export function MemberSection({ row, manageable, offline, now, connectors = [], canDisconnect = false, agentsByToken = {} }: MemberSectionProps) {
   const headingId = `member-${row.id.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
   const active = row.status === 'active';
 
@@ -69,10 +77,25 @@ export function MemberSection({ row, manageable, offline, now }: MemberSectionPr
           </dd>
         </div>
         <div className={styles.fact}>
+          <dt>Connected machines</dt>
+          <dd>{connectors.length}</dd>
+        </div>
+        <div className={styles.fact}>
           <dt>Active tokens</dt>
           <dd>{row.bootstrap && row.activeTokenCount === 0 ? 'Admin token' : row.activeTokenCount}</dd>
         </div>
       </dl>
+
+      {connectors.length > 0 && (
+        <section className={styles.tokens} aria-label={`Connected machines for ${row.name}`}>
+          <h3 className={styles.tokensTitle}>Connected machines</h3>
+          <ul className={styles.tokenList}>
+            {connectors.map(c => (
+              <ConnectorRow key={c.tokenId} connector={c} canDisconnect={canDisconnect} offline={offline} now={now} agents={agentsByToken[c.tokenId] ?? []} />
+            ))}
+          </ul>
+        </section>
+      )}
 
       <section className={styles.tokens} aria-label={`Tokens for ${row.name}`}>
         <h3 className={styles.tokensTitle}>Tokens</h3>

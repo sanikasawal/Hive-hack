@@ -1,124 +1,104 @@
-# Hive — local coordinator for AI coding agents (fresh build, November 2026)
+# Hive
 
-Hive helps several AI coding agents working on one TypeScript repository agree on shared
-interfaces before incompatible work spreads. Agents register what they intend to do; Hive finds
-candidate conflicts with deterministic rules and the TypeScript compiler, proposes a versioned
-**Ghost Contract** (a pending interface declaration consumers can type-check against while the
-producer is still working), records exact-version acknowledgements, stages supported semantic
-edits safely, and only calls an agreement *verified* when real code passes a real test command.
+Hive keeps several AI coding agents working on one TypeScript repository from breaking each other's work.
+Each agent tells Hive what it is about to change; Hive checks every teammate's in-progress changes together
+with the TypeScript compiler and deterministic rules, and tells an agent before it writes code that would
+break someone else. When two agents disagree about a shared interface, Hive records a versioned agreement
+(a **Ghost Contract**) that both sign, and only calls it *verified* when a real test passes on the real code.
 
-This is a clean rebuild from a starter kit. It is a working hackathon build, not a product.
-`docs/PROGRESS.md` says precisely what is implemented and tested, `VERIFICATION.md` what was run.
+## Join a workspace
 
-## Requirements
-Node 22.18 or newer (built and tested on v22.22.3; native TypeScript execution and the built-in
-`node:sqlite`). No native modules. `npm install` pulls ts-morph, the MCP SDK and zod.
+Someone on your team runs a Hive hub and sends you an **invite link** like
+`https://<hub>/ui/join#token=…`. Open it: you are signed in to the team dashboard in that browser tab
+(the token stays in the tab; it is never sent to the server in the URL).
 
-## Run
+The dashboard's Connect screen then shows one command with your hub filled in. Run it **inside your own
+clone of the team repository**:
+
 ```bash
-npm install
-npm run check          # root typecheck + 105 tests (about a minute; spawns daemons and node --test children)
-npm run build:web      # builds the React dashboard into web/dist (the daemon serves it at /ui)
-npm start              # the one shared daemon (loopback by default), dashboard at http://127.0.0.1:4317/ui
-npm run demo           # SCRIPTED REPLAY of the full flow on a temp copy of fixtures/billing (exit 0 = all states reached)
-npm run evaluate -- --repeats 3   # ACCEPTANCE.md scenarios with/without Hive -> evaluation/results-<timestamp>.{json,md}
-
-# Seeded live dashboard (billing scenario on a temp copy of ../hive-playground; no model call):
-node --disable-warning=ExperimentalWarning scripts/seed-demo.ts --port 4318 [--keep]
-# prints http://127.0.0.1:4318/ui/ and a throwaway admin token to stderr (or uses $HIVE_TOKEN without printing it)
+npx hive-connect connect --hub https://<hub>
 ```
-`.env` holds `HIVE_TOKEN` (the operator/admin token; generate one with
-`node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`) and
-optionally `MODEL_API_KEY` for Muse Spark analysis. Never commit `.env`.
 
-Daemon settings: `HIVE_PROJECT_ROOT` (default: current directory; use the repository you want
-coordinated), `HIVE_DATA_DIR` (default `<root>/.hive`, SQLite file `hive.db`), `HIVE_HOST`
-(default `127.0.0.1`; `0.0.0.0` only behind TLS), `PORT` then `HIVE_PORT` (4317), `HIVE_PUBLIC_URL`
-(public base URL used in the dashboard's connect snippets), `HIVE_WEB_DIST` (alternative web build
-folder), `HIVE_TSCONFIG`, `HIVE_VERIFY_ALLOW` (comma-separated command prefixes allowed for
-`hive_verify`; default `npm test,npm run,node --test,npx tsc,npx vitest`),
-`HIVE_REQUIRE_AGREEMENT=1` (also gate operations on symbols other sessions depend on),
-`HIVE_HOOK_GATE=ask|deny|warn` (pre-write hook behavior).
+> **Status:** the `hive-connect` package is not on npm yet. Until it is published, install it from a clone
+> of this repository: see [Installing hive-connect before it is published](docs/CLIENTS.md#installing-hive-connect-before-it-is-published).
 
-### Dashboard, roles and tokens
-Open `/ui` and sign in with a token (kept in the tab's sessionStorage, never in the page or bundle).
-- **admin**: `HIVE_TOKEN` (the operator) or an admin token. Everything, including `token_create`,
-  `token_list`, `token_rename`, `token_revoke` (Members page).
-- **member**: a token per person/laptop. Registers agents and runs session commands only on sessions
-  registered with its own token; can use `/mcp`.
-- **viewer**: read-only (for judges). Only `GET /api/view`, `/me`, `/events` (scrubbed) and `/healthz`;
-  every POST, `/snapshot` and `/mcp` is refused with 403.
+What the command does, in order:
+1. Detects the repository (folder, remote, branch) and asks `Connect <name> (<remote>) to Hive at <hub>? [Y/n]`.
+2. Prints a short code and opens `<hub>/ui/pair/<code>` in your browser. You approve
+   "Connect <repo> on <machine> as <you>". No token is copied or pasted.
+3. Stores the resulting connector credential in your OS keychain (macOS Keychain, Linux `secret-tool`, Windows
+   Credential Manager, untested), or in `~/.config/hive/credentials.json` (mode 0600) with a warning when no keychain exists.
+4. Configures your coding client for this repository only, without touching your other settings, and starts a
+   small background process that keeps Hive informed of your branch and changed `.ts`/`.tsx` files.
+5. Prints one next step: **start or restart Claude Code in this folder.**
 
-Token values are shown once when created and stored hashed. `GET /healthz` needs no token.
+Later: `hive-connect status` (is everything connected), `hive-connect connect` again (repairs the setup, no
+duplicates), `hive-connect disconnect` (stops the background process, revokes the credential and removes only
+Hive's entries from your config files).
 
-## Connect a coding client
-Each client starts its own stdio adapter, or connects over HTTP MCP; all of them talk to the same
-daemon. Do not launch a separate daemon per agent. Stdio templates (replace `/ABSOLUTE/PATH/Hive`):
-- Claude Code: `config/claude-code.mcp.example.json` (MCP) and `config/claude-code.settings.example.json` (hooks).
-- Muse Code: `config/muse-code.settings.example.json` — MCP fields follow the official docs; the hooks
-  block is a best guess because the hook stdin/stdout contract is not documented and Muse Code was
-  not available on the build machine. See `docs/CLIENTS.md` for exactly what is gated vs observed.
+## What you will see
 
-HTTP MCP (Streamable HTTP at `/mcp`, member or admin token; placeholders, not real values):
-```bash
-claude mcp add --transport http hive https://<your-hive-host>/mcp --header "Authorization: Bearer <member-token>"
-```
-or in `.mcp.json`: `{"mcpServers": {"hive": {"type": "http", "url": "https://<your-hive-host>/mcp",
-"headers": {"Authorization": "Bearer <member-token>"}}}}`. The dashboard's Connect page generates these
-with your host filled in. Caveat: a remote daemon checks and edits **its own** checkout
-(`HIVE_PROJECT_ROOT`), not the files on the agent's laptop; see `docs/CLIENTS.md`.
+- **On the dashboard** (`<hub>/ui`): your agent appears next to your teammates' agents with your machine,
+  branch, short HEAD and number of changed files; findings (for example "pricing agent changes `getPrice` to
+  cents, invoice agent still expects dollars"), agreements and their state: *proposed*, *accepted*,
+  *implemented*, *verified*. These words are never merged on any screen.
+- **In your agent's session**: at session start and on every prompt the agent receives a short Hive summary.
+  Before it edits a file, Hive type-checks the edit together with everyone's in-progress changes; if the edit
+  would break a file a teammate is changing, Claude Code asks you before writing it.
+- **Model analysis** (Meta Muse Spark) explains conflicts that type-check but disagree in meaning (units,
+  formats). It runs on the hub; if the hub cannot reach the model, the dashboard says *unavailable*, never
+  "no conflict".
 
-MCP tools: `hive_register`, `hive_set_intent`, `hive_context`, `hive_symbol`, `hive_reindex`,
-`hive_preview_operation`, `hive_apply_operation`, `hive_propose_contract`, `hive_acknowledge`,
-`hive_revise_contract`, `hive_reject_contract`, `hive_contract_check`, `hive_verify`, `hive_claim`,
-`hive_analyze`, `hive_finish`.
+## Supported clients
 
-## Laptop sync (each teammate on their own machine)
-Hive keeps each member's uncommitted `.ts`/`.tsx` changes (sent by their Claude Code hook) and type-checks them
-together, so an edit that would break a teammate's in-progress code is caught before it is written. Setup is one
-command from the Connect screen. Details and limits: `docs/DEPLOY.md` (Laptop sync).
+| Client | How Hive connects | Status |
+|---|---|---|
+| Claude Code | stdio MCP server `hive-connect mcp` in `<repo>/.mcp.json` + hooks in `<repo>/.claude/settings.local.json` | Hub side tested (hook contract, HTTP MCP, pairing); the CLI's bridge and hook commands land with `cli/`; see [docs/CLIENTS.md](docs/CLIENTS.md) |
+| Muse Code | `mcp_servers.hive` in `~/.config/muse/settings.json` + `<repo>/.muse/hooks.json` | MCP fields follow Meta's docs; the hook format is a best guess, **not verified live** |
+| Any other MCP client | the stdio command `hive-connect mcp`, or HTTP MCP at `<hub>/mcp` with a bearer header | Generic MCP; no hooks |
 
-## Deploying
-Hive runs as a plain Node program (no Docker). Hosting steps for Railway's Node builder are in
-`docs/DEPLOY.md` (`railway.json`, one volume at `/data`). **Nothing has been deployed.**
+## FAQ
 
-## Implemented and tested (see docs/PROGRESS.md for detail)
-- One daemon, SQLite durability (`node:sqlite`, WAL, migrations), repositories/workspaces
-  (worktrees), session leases, intent revisions, durable events, restart recovery.
-- Compiler index (ts-morph): symbols keyed `path#Qualified.name:kind`, references resolved
-  through aliases/barrels/re-exports, overload sets, excluded files, hash-based direct-edit detection.
-- Findings: assumption mismatch (deterministic), compiler `dependent_write`, informational
-  overlaps, `direct_edit` after the fact, `claim_violation`; unrelated work stays unwarned.
-- Staged operations `add_field` and `change_signature`: preview with baseline-relative
-  diagnostics, diff and callers; apply under a writer lock with revision + hash recheck, durable
-  journal, rollback and crash recovery. Required arguments/fields are never invented.
-- Ghost Contracts: validated declarations, overlay type-check for consumers, real check without
-  overlay, exact-version acknowledgements, revise clears acks, agreement gate, `implemented`
-  from compiler evidence, `verified` only from an allowlisted test command exit 0 + real
-  type-check + implementation evidence; later edits downgrade the evidence.
-- Muse Spark analyzer: bounded evidence, structured output, validated/cited findings, cache,
-  bounded retry, explicit `unavailable`/`invalid`/`stale` states (mock-tested only, see below).
-- Client hook adapter (Claude Code JSON contract; Muse plain text + raw payload capture),
-  scripted demo, evaluation harness.
-- Cloud build (2026-11-02/03): admin/member/viewer tokens, hostable daemon (`/healthz`, graceful
-  SIGTERM, cached snapshot, paged events), asynchronous verification, HTTP MCP at `/mcp`,
-  Railway config (Docker packaging removed 2026-11-03), React dashboard at `/ui`. Local release checks: `VERIFICATION.md`.
+**Do I need a Meta (Muse Spark) API key?** No. The model key lives only on the hub. Nothing Hive writes on your
+laptop contains it.
 
-## Not done / not verified
-- Live model: `evaluation/results-2026-11-02T23-36-49-615Z.md` records a configured `muse-spark-1.3`
-  with token usage in a scripted evaluation; no live Muse Spark result was recorded for the cloud build
-  or in a live coding-session demo.
-- Muse Code was not installed: its hook schema and MCP loading are unverified live.
-- Not deployed: no Railway (or other hosted) run yet.
-- No run with two real independent agents yet (Claude Code can serve as a client with the
-  templates; the demo and evaluation are scripted replays and labelled as such).
-- `rename_symbol` and `add_endpoint` are rejected explicitly, not implemented.
-- Direct edits are observed afterwards; only the client's own hooked tool calls can be gated.
+**Do I need to install or run the Hive backend?** No. You only need Node 18+, git, and your coding client. The
+hub is run once by whoever administers the workspace.
 
-## Why a local daemon?
-One coordinator with thin adapters avoids separate in-memory worlds per agent, centralizes
-writer serialization and gives the dashboard one event source. It defaults to loopback on one
-trusted machine; hosting it adds per-member tokens and roles, but it still serves one trusted
-repository checkout and runs that repository's allowlisted tests without sandboxing.
+**Does Hive change my files?** The connect command writes only Hive's own entries to `.mcp.json`,
+`.claude/settings.local.json` (excluded from git via `.git/info/exclude`) and, for Muse Code, its settings
+(backed up first). Your source files are sent to the hub so it can type-check them; the hub never writes them
+back to your laptop.
 
-See `docs/SOURCES.md` for the documentation checked while building.
+**Where is my token?** In your OS keychain (or the 0600 fallback file). It is never put in config files,
+environment variables or hook commands. `hive-connect disconnect` deletes it and revokes it on the hub.
+
+**What does Hive not catch?** Type errors are found deterministically; meaning-level conflicts depend on the
+model. Edits made outside the client's Edit/Write tools are picked up at the next prompt, not blocked.
+
+**Is anyone's code run on the hub?** Only the hub's own checkout of the repository, and only test commands on
+the hub's allowlist (`HIVE_VERIFY_ALLOW`). Commands proposed by an agent never run otherwise.
+
+## More
+
+- [docs/DEMO.md](docs/DEMO.md): a guided demo with the sample billing project and three agent tasks.
+- [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md): run your own hub (install, dashboard build, environment
+  variables, admin token, Railway, model diagnostics, upgrades and backups).
+- [docs/CLIENTS.md](docs/CLIENTS.md): exactly what each client integration does and what is verified.
+- Developing Hive: Node 22.18+, `npm install && npm run check` (typecheck + tests), then
+  [TEAMMATE_START_HERE.md](TEAMMATE_START_HERE.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
+  [docs/PROGRESS.md](docs/PROGRESS.md) (what is implemented, tested, and not yet verified live).
+
+## Honest status (2026-11-03)
+
+- The hub side (pairing, connector credentials, checkout reports, model diagnostics, `HIVE_MODEL_PROXY_URL`) and the
+  `hive-connect` CLI in `cli/` are implemented and covered by `npm test` (141 tests, including
+  `tests/acceptance-two-users.test.ts`, which runs the real CLI for two users against a spawned hub) and
+  `npm run test:cli` (12 tests). Spec:
+  [docs/superpowers/specs/2026-11-03-connect-cli-design.md](docs/superpowers/specs/2026-11-03-connect-cli-design.md).
+- The team hub is hosted at `https://hive-hack-production.up.railway.app` (Railway, one service). From that host the
+  Meta Model API accepts the key but lists no models and answers `model_not_found` for `muse-spark-1.3`; the same key
+  works from a laptop. Model analysis on that hub therefore shows *unavailable* until the host is accepted. See
+  [model diagnostics](docs/SELF_HOSTING.md#7-model-diagnostics-and-egress).
+- **Pending:** publishing `hive-connect` to npm, Muse Code verified live, and a run with two real people on two laptops.
+- Built during the Meta Global AI Developer Hackathon (Nov 2026) from a starter kit; see `docs/SOURCES.md`.

@@ -2,11 +2,22 @@
 // sources so the client cannot drift from what the daemon sends. Relative paths, not the "@hive"
 // alias, so this folder also type-checks and runs under Node for the backend's test suite.
 import type { Event, VerificationRun } from '../../../src/domain/types.ts';
-import type { HiveView, MemberSummary, ServiceSnapshot, ViewEvent } from '../../../src/service.ts';
+import type { ModelDiagnosis } from '../../../src/intelligence/meta.ts';
+import type { ConnectorSummary, HiveView, MemberSummary, ServiceSnapshot, ViewEvent } from '../../../src/service.ts';
+import type { PairingInfo, PairingStatus } from '../../../src/server/pairing.ts';
 import type { Command } from '../../../src/server/schemas.ts';
 import type { CreatedToken, Role, TokenRecord } from '../../../src/server/tokens.ts';
 
-export type { Command, CreatedToken, Event, HiveView, MemberSummary, Role, ServiceSnapshot, TokenRecord, VerificationRun, ViewEvent };
+export type { Command, ConnectorSummary, CreatedToken, Event, HiveView, MemberSummary, ModelDiagnosis, PairingInfo, PairingStatus, Role, ServiceSnapshot, TokenRecord, VerificationRun, ViewEvent };
+
+/** What signed in: the operator (HIVE_TOKEN), a member's browser/agent token, or a Hive Connect credential. */
+export type MeKind = 'operator' | 'member' | 'connector' | 'viewer-link';
+
+/** pair_approve answer: the pairing plus the connector label the CLI will receive. */
+export type PairingApproved = PairingInfo & { label: string };
+
+/** connector_disconnect answer. */
+export interface ConnectorDisconnected { disconnected: boolean; tokenId: string; revokedAt: number | null; checkoutCleared: boolean }
 
 /** GET /me (src/server/daemon.ts `me()`): who the caller is and what this service is. */
 export interface Me {
@@ -18,6 +29,14 @@ export interface Me {
   workspace: { id: string; name: string; root?: string };
   /** HIVE_PUBLIC_URL, or null when unset (then use window.location.origin). */
   publicUrl: string | null;
+  /** Older daemons omit the fields below. */
+  kind?: MeKind;
+  /** HIVE_PUBLIC_URL, or the address this request reached the hub on (X-Forwarded-Proto + Host). */
+  hubUrl?: string;
+  /** The one command a teammate runs inside their repository. */
+  connect?: { cliCommand: string };
+  /** Only for a Hive Connect credential: the repository and machine it is bound to. */
+  connector?: { repoIdentity: string | null; machine: string | null };
   model: { configured: boolean; model: string };
   version: string;
 }

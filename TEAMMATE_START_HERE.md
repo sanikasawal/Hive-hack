@@ -54,7 +54,8 @@ scripts/seed-demo.ts    starts a live, realistic workspace for screenshots and d
 scripts/smoke-model.ts  one real Muse Spark call; prints model, latency, tokens; never the key
 demo/scenario.ts        labelled scripted replay of the whole flow (exit 0 = all states reached)
 demo/evaluate.ts        ACCEPTANCE scenarios with/without Hive -> evaluation/results-*.{json,md}
-railway.json, docs/DEPLOY.md   hosting config, Node builder, no Docker (not deployed yet)
+railway.json, docs/SELF_HOSTING.md   hosting config + operator guide (docs/DEPLOY.md now points there)
+cli/                    hive-connect CLI (spec section 4; compiled to cli/dist, Node 18+), when present
 fixtures/billing        tiny sample app used by tests; ../hive-playground (outside this repo) is the bigger sample
 config/                 client config templates (Claude Code MCP + hooks; Muse Code best guess)
 docs/                   PRODUCT, ARCHITECTURE, BUILD_PLAN, ACCEPTANCE, PROGRESS, CLIENTS, CLOUD, DEPLOY,
@@ -152,4 +153,28 @@ Co-located agents can also use the stdio adapter (`config/claude-code.mcp.exampl
   `tests/mcp-http.test.ts`, `tests/hostable.test.ts`, `tests/verify-async.test.ts`.
 - API surface: `src/server/schemas.ts` (every command), `src/server/daemon.ts` (every route).
 - Dashboard data contract: `src/service.ts` (`ServiceSnapshot`, `viewCached`), `web/src/api/`.
-- Deployment: `docs/DEPLOY.md`, `railway.json`.
+- Deployment: `docs/SELF_HOSTING.md`, `railway.json`. Guided demo: `docs/DEMO.md`.
+
+## 11. hive-connect and publishing (added 2026-11-03)
+The public path for a teammate is now: invite link from the dashboard (`<hub>/ui/join#token=…`), then one
+command in their own clone: `npx hive-connect connect --hub <hub>`. It pairs through the browser (`pair_start` →
+approve at `<hub>/ui/pair/<code>` → `pair_poll` returns a connector token once), stores the token in the OS
+keychain, writes token-free Claude Code / Muse Code config that calls `hive-connect hook …` and
+`hive-connect mcp`, and starts `hive-connect node` (checkout reports + laptop sync). Spec:
+`docs/superpowers/specs/2026-11-03-connect-cli-design.md`; client details: `docs/CLIENTS.md`.
+
+The model key stays on the hub (`MODEL_API_KEY` is never written to laptops). If the hub's egress is refused by
+the Meta API, see `docs/SELF_HOSTING.md` section 7 (`model_diagnose`, `HIVE_MODEL_PROXY_URL`, a pass-through
+`HIVE_MODEL_BASE_URL`, and the operator-only laptop relay).
+
+Publishing (a human step; needs the npm account owner):
+```bash
+cd cli && npm login && npm publish --access public
+```
+Until it is published, install from a clone: `cd cli && npm install && npm install -g .` (verified shape; plain
+`npm install -g ./cli` without the local install leaves the MCP SDK missing). `npx github:Vishal2602/Hive-hack`
+only works if the root `package.json` exposes the `hive-connect` bin, which it does not today.
+
+Verified vs pending at this update: hub pairing, connectors, checkout reports, `model_diagnose` and the proxy are
+in `npm test`. Pending: the `cli/` package itself and its tests, npm publishing, a recorded public hub URL, the
+hosted model fix (needs the deployment), Muse Code live, and a two-person run.

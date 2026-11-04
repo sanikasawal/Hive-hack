@@ -31,6 +31,9 @@ export interface ProposeInput {
   proposalId?: string;
 }
 export interface ReviseInput { title?: string; declaration?: string; behaviorNotes?: string }
+/** The local checkout behind a session, from the last checkout_report of the session's token (Hive Connect). */
+export interface SessionConnector { machine: string | null; repoName: string; branch: string | null; headShort: string | null; dirtyCount: number; reportedAt: number }
+export type SnapshotSession = Session & { connector?: SessionConnector | null };
 
 type SessionRow = { id: string; workspace_id: string; name: string; client: string | null; lease_expires_at: number; status: SessionStatus; token_id: string | null; member: string | null };
 type IntentRow = { session_id: string; revision: number; task: string; scope_json: string; assumptions_json: string; created_at: number };
@@ -391,12 +394,30 @@ export class Coordinator {
     for (const detector of this.detectors) all.push(...detector(intents));
     return all;
   }
-  snapshot(): Snapshot {
+  snapshot(): Snapshot & { sessions: SnapshotSession[] } {
     this.expire();
     const intents = this.intents();
     const findings = [...detect(intents)];
     for (const detector of this.detectors) findings.push(...detector(intents));
-    return structuredClone({ repository: this.repository(), workspaces: this.workspaces(), sessions: this.sessions(), intents,
+    return structuredClone({ repository: this.repository(), workspaces: this.workspaces(), sessions: this.withConnectors(this.sessions()), intents,
       contracts: this.contracts(), findings, events: this.recentEvents() });
+  }
+  /** Joins each session's token to its latest checkout report (one indexed read per distinct token). */
+  private withConnectors(sessions: Session[]): SnapshotSession[] {
+    const cache = new Map<string, SessionConnector | null>();
+    const lookup = (tokenId: string): SessionConnector | null => {
+      if (cache.has(tokenId)) return cache.get(tokenId)!;
+      const row = this.store.get<{ machine: string | null; token_machine: string | null; repo_json: string; branch: string | null; head: string | null; dirty_json: string; reported_at: number }>(
+        'SELECT c.machine, t.machine AS token_machine, c.repo_json, c.branch, c.head, c.dirty_json, c.reported_at FROM checkouts c LEFT JOIN tokens t ON t.id = c.token_id WHERE c.token_id = ?', tokenId);
+      let found: SessionConnector | null = null;
+      if (row) {
+        const repo = JSON.parse(row.repo_json) as { name?: string };
+        found = { machine: row.token_machine ?? row.machine ?? null, repoName: repo.name ?? '', branch: row.branch, headShort: row.head ? row.head.slice(0, 7) : null,
+          dirtyCount: (JSON.parse(row.dirty_json) as unknown[]).length, reportedAt: Number(row.reported_at) };
+      }
+      cache.set(tokenId, found);
+      return found;
+    };
+    return sessions.map(session => ({ ...session, connector: session.tokenId ? lookup(session.tokenId) : null }));
   }
 }

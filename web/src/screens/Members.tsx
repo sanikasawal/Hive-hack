@@ -18,7 +18,7 @@ import styles from './members/members.module.css';
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 export default function Members() {
-  const { role: myRole, status, connection, view, events, error } = useHive();
+  const { role: myRole, status, connection, view, events, error, memberSummaries, snapshot, sessionName, me } = useHive();
   const navigate = useNavigate();
   const now = useNow(15_000);
   const [previewViewer, setPreviewViewer] = useState(false);
@@ -32,6 +32,9 @@ export default function Members() {
   const invite = () => navigate(INVITE_PATH);
 
   const others = access.rows.filter(r => !r.isMe);
+  const connectorsBy = new Map(memberSummaries.map(m => [m.member, m.connectors ?? []]));
+  const agentsByToken: Record<string, string[]> = {};
+  for (const s of snapshot.sessions) if (s.tokenId) (agentsByToken[s.tokenId] ??= []).push(sessionName(s.id));
   // What /api/view would list: members with at least one connected agent.
   const previewPeople = access.rows.filter(r => r.agents.length > 0).map(r => ({ member: r.name, sessions: r.agents.length }));
   const summary = role === 'viewer'
@@ -72,7 +75,7 @@ export default function Members() {
       )}
       {role === 'member' && (
         <Alert tone="info" title="Only admins manage tokens">
-          You can see the token you signed in with and the agents it connected. Ask an admin to invite people, rename or revoke tokens.
+          You can see the token you signed in with, your connected machines and their agents, and disconnect your own machines. Ask an admin to invite people, rename or revoke tokens.
         </Alert>
       )}
       {offline && manageable && (
@@ -89,7 +92,9 @@ export default function Members() {
           ) : (
             <>
               {access.rows.map(row => (
-                <MemberSection key={row.id} row={row} manageable={manageable} offline={offline} now={now} />
+                <MemberSection key={row.id} row={row} manageable={manageable} offline={offline} now={now}
+                  connectors={previewViewer ? [] : connectorsBy.get(row.name) ?? []}
+                  canDisconnect={!previewViewer && (signedInRole === 'admin' || row.name === me?.name)} agentsByToken={agentsByToken} />
               ))}
               {access.scope === 'all' && others.length === 0 && (
                 <div className={styles.empty}>

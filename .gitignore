@@ -11,3 +11,6 @@ web/node_modules/
 web/dist/
 web/screenshots/
 superdesign/mock-v2/img/
+
+# Live acceptance traces (scripts/acceptance-live.ts)
+acceptance/

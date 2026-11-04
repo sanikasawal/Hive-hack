@@ -45,7 +45,7 @@ function viewContractToContract(contract: ViewContract): Contract {
 /** Lifts the viewer-safe view into a ServiceSnapshot. `events` (from /events) replace the view's recent ones when present. */
 export function viewToSnapshot(view: ViewResponse, events: EventItem[] = [], now = Date.now()): SnapshotResponse {
   const sessions = view.sessions.map(s => ({ id: s.id, name: displaySessionName(s.agent, s.member), workspaceId: '', client: null,
-    expiresAt: now + 60_000, status: 'active' as const, member: s.member, tokenId: null }));
+    expiresAt: now + 60_000, status: 'active' as const, member: s.member, tokenId: null, connector: s.connector ?? null }));
   const intents = view.sessions.filter(s => s.task !== null).map(s => ({ sessionId: s.id, task: s.task!, files: [], symbols: [], assumptions: [], revision: 0, at: 0 }));
   return {
     repository: { id: '', canonicalRoot: view.workspace.name, revision: view.revision },
@@ -58,7 +58,8 @@ export function viewToSnapshot(view: ViewResponse, events: EventItem[] = [], now
     proposals: [], claims: [],
     analysis: view.analysis ? { id: '', status: view.analysis.status as NonNullable<ServiceSnapshot['analysis']>['status'], summary: view.analysis.summary,
       findings: [], model: view.analysis.model, latencyMs: view.analysis.latencyMs, usage: null, attempts: 0, dropped: [], inputHash: '', revision: view.revision,
-      error: null, evidenceRefs: { symbols: [], files: [], sessions: [], candidates: 0 }, at: view.analysis.at } : null,
+      error: null, evidenceRefs: { symbols: [], files: [], sessions: [], candidates: 0 }, at: view.analysis.at,
+      ...(view.analysis.relayedBy ? { relayedBy: view.analysis.relayedBy } : {}) } : null,
     model: view.model,
     ...(view.remote ? { remote: { baseCommit: view.remote.baseCommit, members: view.remote.members.map(m => ({ member: m.member, baseCommit: null, files: m.files })) } } : {}),
     cacheAgeMs: view.cacheAgeMs,

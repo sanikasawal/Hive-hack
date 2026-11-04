@@ -1,0 +1,37 @@
+{
+  "name": "hive-connect",
+  "version": "0.1.0",
+  "description": "Connect a local repository and coding agent (Claude Code, Muse Code, any MCP client) to a hosted Hive workspace with one command.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "hive-connect": "dist/main.js",
+    "hive": "dist/main.js"
+  },
+  "main": "dist/main.js",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node -e \"require('fs').chmodSync('dist/main.js', 0o755)\"",
+    "test": "node --test test/*.test.mjs",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Vishal2602/Hive-hack.git",
+    "directory": "cli"
+  },
+  "keywords": ["hive", "mcp", "claude-code", "coding-agents", "coordination"],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "typescript": "~5.9.3"
+  }
+}

@@ -204,11 +204,12 @@ try {
       break;
     }
     case 'analyze': {
-      // Laptop relay: Hive builds the Muse Spark request; this laptop sends it with its own key and hands the
-      // raw response back. Hive validates and records it exactly as a direct call. The key never leaves this laptop.
+      // Operator fallback (laptop relay): Hive builds the Muse Spark request; this laptop sends it with a key read
+      // from the environment for this run only and hands the raw response back. Hive validates and records it exactly
+      // as a direct call, labelled as relayed. The key is never written to disk, logged, or sent to Hive.
       const key = (process.env.MODEL_API_KEY ?? '').trim();
       if (!key) {
-        process.stdout.write('Hive: MODEL_API_KEY is not set on this laptop. Re-run the Connect setup with MODEL_API_KEY set, or run: MODEL_API_KEY=<key> node .hive/hive-hook.mjs analyze\n');
+        process.stdout.write('Hive: MODEL_API_KEY is not set for this run. The model key normally stays on the Hive hub; to relay one analysis from this laptop as an operator, run: MODEL_API_KEY=<key> node .hive/hive-hook.mjs analyze (the key is read from the environment and never stored)\n');
         process.exitCode = 1; break;
       }
       const request = await callDaemon('/command', { action: 'analysis_relay_request' }) as { inputHash: string; model: string; baseUrl: string; body: string };
@@ -221,9 +222,11 @@ try {
           body: request.body, signal: AbortSignal.timeout(120_000) });
         httpStatus = response.status; responseText = await response.text();
       } catch (error) { responseText = error instanceof Error ? `${error.name}: ${error.message}` : String(error); }
+      // A provider error may echo the key back; it must not reach Hive's records.
+      if (key.length >= 4) responseText = responseText.split(key).join('[redacted]');
       const analysis = await callDaemon('/command', { action: 'analysis_relay_submit', inputHash: request.inputHash, httpStatus, responseText, latencyMs: Date.now() - started }) as
         { status: string; summary: string; error: string | null; model: string | null; latencyMs: number | null; findings: { kind: string; explanation: string; suggestion: string; proposedDeclaration?: string; confidence: string }[]; dropped: string[] };
-      const lines = [`Hive analysis: ${analysis.status}${analysis.model ? ` (${analysis.model}, ${analysis.latencyMs} ms, relayed by this laptop)` : ''}`];
+      const lines = [`Hive analysis: ${analysis.status}${analysis.model ? ` (${analysis.model}, ${analysis.latencyMs} ms, relayed by this laptop)` : ' (relayed by this laptop)'}`];
       if (analysis.error) lines.push(`Error: ${analysis.error}`);
       if (analysis.summary) lines.push(`Summary: ${analysis.summary}`);
       for (const f of analysis.findings) {

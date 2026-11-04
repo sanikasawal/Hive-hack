@@ -6,9 +6,13 @@
   "engines": {
     "node": ">=22.18.0"
   },
+  "bin": {
+    "hive-connect": "cli/dist/main.js"
+  },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning --env-file-if-exists=.env src/server/daemon.ts",
     "start:prod": "node --disable-warning=ExperimentalWarning src/server/daemon.ts",
+    "build": "npm run build:web",
     "mcp": "node --disable-warning=ExperimentalWarning --env-file-if-exists=.env src/server/mcp.ts",
     "demo": "node --disable-warning=ExperimentalWarning --env-file-if-exists=.env demo/scenario.ts",
     "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.ts",
@@ -17,7 +21,9 @@
     "test:core": "node --disable-warning=ExperimentalWarning --test tests/coordination.test.ts tests/store.test.ts tests/ops.test.ts",
     "evaluate": "node --disable-warning=ExperimentalWarning --env-file-if-exists=.env demo/evaluate.ts",
     "smoke:model": "node --disable-warning=ExperimentalWarning --env-file-if-exists=.env scripts/smoke-model.ts",
-    "build:web": "npm --prefix web ci && npm --prefix web run build"
+    "build:web": "npm --prefix web ci && npm --prefix web run build",
+    "build:cli": "npm --prefix cli ci && npm --prefix cli run build",
+    "test:cli": "npm --prefix cli test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

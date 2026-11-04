@@ -79,6 +79,8 @@ export interface AccessInput {
   memberNames?: string[];
   /** The stored sign-in token, used only to show a member their own prefix. Never the operator's. */
   signedInToken?: string | null;
+  /** The signed-in member's Hive Connect credentials (member_list connectors): their agents count as the member's own. */
+  connectorTokenIds?: string[];
   now: number;
 }
 
@@ -130,6 +132,7 @@ function adminRows(input: AccessInput, me: NonNullable<AccessInput['me']>): Memb
   for (const session of input.sessions) if (session.member) add(session.member);
   if (me.tokenId === null) add(me.member);
 
+  const connectorIds = new Set(input.tokens.filter(t => t.kind === 'connector').map(t => t.id));
   const rows: MemberRow[] = [];
   for (const [name, records] of byMember) {
     const tokens = sortTokens(records.map(record => ({
@@ -138,7 +141,9 @@ function adminRows(input: AccessInput, me: NonNullable<AccessInput['me']>): Memb
       agents: input.sessions.filter(s => s.tokenId === record.id).map(toAgent),
       current: record.id === me.tokenId, detailsKnown: true,
     })));
-    const active = tokens.filter(t => t.revokedAt === null);
+    // Hive Connect credentials are listed as connected machines, not as tokens; their agents still count.
+    const listed = tokens.filter(t => !connectorIds.has(t.id));
+    const active = listed.filter(t => t.revokedAt === null);
     const isMe = name === me.member;
     const bootstrap = isMe && me.tokenId === null;
     // Operator sessions have no token row; they still belong to the operator.
@@ -149,7 +154,7 @@ function adminRows(input: AccessInput, me: NonNullable<AccessInput['me']>): Memb
     const newest = active[0] ?? tokens[0];
     const role: Role = bootstrap ? 'admin' : newest?.role ?? (name === OPERATOR ? 'admin' : isMe ? me.role : 'member');
     rows.push({
-      id: name, name, role, isMe, bootstrap, tokens, activeTokenCount: active.length, agents, lastActiveAt,
+      id: name, name, role, isMe, bootstrap, tokens: listed, activeTokenCount: active.length, agents, lastActiveAt,
       joinedAt: records.length ? Math.min(...records.map(r => r.createdAt)) : null,
       status: bootstrap ? 'active' : statusOf(active.length, lastActiveAt, input.now),
     });
@@ -158,14 +163,17 @@ function adminRows(input: AccessInput, me: NonNullable<AccessInput['me']>): Memb
 }
 
 function ownRow(input: AccessInput, me: NonNullable<AccessInput['me']>): MemberRow {
-  const mine = input.sessions.filter(s => (me.tokenId ? s.tokenId === me.tokenId : s.member === me.member && !s.tokenId)).map(toAgent);
+  const connectors = new Set(input.connectorTokenIds ?? []);
+  const own = (s: SessionLike) => (me.tokenId ? s.tokenId === me.tokenId : s.member === me.member && !s.tokenId);
+  const viaConnector = input.sessions.filter(s => s.tokenId != null && connectors.has(s.tokenId)).map(toAgent);
+  const mine = input.sessions.filter(own).map(toAgent);
   const tokens: TokenView[] = me.tokenId ? [{
     id: me.tokenId, label: 'The token you signed in with', role: me.role,
     prefix: prefixFromSecret(input.signedInToken) ?? '', createdAt: null, lastUsedAt: input.now, revokedAt: null,
     agents: mine, current: true, detailsKnown: false,
   }] : [];
   return { id: me.member, name: me.member, role: me.role, isMe: true, bootstrap: me.tokenId === null, tokens,
-    activeTokenCount: tokens.length, agents: mine, lastActiveAt: input.now, joinedAt: null, status: 'active' };
+    activeTokenCount: tokens.length, agents: [...mine, ...viaConnector], lastActiveAt: input.now, joinedAt: null, status: 'active' };
 }
 
 /** Rows for the Members screen, scoped to what the signed-in role may see. */
@@ -174,7 +182,7 @@ export function buildAccess(input: AccessInput): Access {
   if (!me || me.role === 'viewer') return { scope: 'none', rows: [], activeTokens: 0 };
   if (me.role === 'admin') {
     const rows = adminRows(input, me);
-    return { scope: 'all', rows, activeTokens: input.tokens.filter(t => t.revokedAt === null).length };
+    return { scope: 'all', rows, activeTokens: input.tokens.filter(t => t.revokedAt === null && t.kind !== 'connector').length };
   }
   const row = ownRow(input, me);
   return { scope: 'own', rows: [row], activeTokens: row.activeTokenCount };

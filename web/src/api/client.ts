@@ -1,7 +1,10 @@
 // Typed client for the Hive daemon. Same-origin by default; the Bearer token lives in
 // sessionStorage under "hive.token" (never localStorage, never in the bundle).
 // No runtime imports: this file also runs under Node (strip-only) in the backend tests.
-import type { Command, CreatedToken, EventItem, Health, Me, MemberSummary, Role, SnapshotResponse, TokenRecord, VerificationRun, ViewResponse } from './types.ts';
+import type {
+  Command, ConnectorDisconnected, CreatedToken, EventItem, Health, Me, MemberSummary, ModelDiagnosis, PairingApproved, PairingInfo, Role, SnapshotResponse,
+  TokenRecord, VerificationRun, ViewResponse,
+} from './types.ts';
 
 export const TOKEN_STORAGE_KEY = 'hive.token';
 export const DEFAULT_TIMEOUT_MS = 8_000;
@@ -169,10 +172,19 @@ export class HiveClient {
   }
   memberList(): Promise<MemberSummary[]> { return this.command({ action: 'member_list' }); }
   /** Admin only. The returned `token` value is shown once and never retrievable again. */
-  tokenCreate(input: { label: string; member: string; role: Role }): Promise<CreatedToken> { return this.command({ action: 'token_create', ...input }); }
+  tokenCreate(input: { label: string; member: string; role: Role; kind?: 'member' | 'connector' | 'viewer-link' }): Promise<CreatedToken> { return this.command({ action: 'token_create', ...input }); }
   tokenList(): Promise<TokenRecord[]> { return this.command({ action: 'token_list' }); }
   tokenRename(tokenId: string, label: string): Promise<TokenRecord> { return this.command({ action: 'token_rename', tokenId, label }); }
   tokenRevoke(tokenId: string): Promise<TokenRecord> { return this.command({ action: 'token_revoke', tokenId }); }
+  /** Hive Connect approval page: what a pairing code asks for (members and admins; not viewers or connectors). */
+  pairInfo(userCode: string): Promise<PairingInfo> { return this.command({ action: 'pair_info', userCode }); }
+  /** Approves a pending pairing for the signed-in member. The CLI then receives the connector credential once. */
+  pairApprove(userCode: string): Promise<PairingApproved> { return this.command({ action: 'pair_approve', userCode }); }
+  pairDeny(userCode: string): Promise<PairingInfo> { return this.command({ action: 'pair_deny', userCode }); }
+  /** Revokes a connector credential and clears its checkout report (own connectors; admins any). */
+  connectorDisconnect(tokenId: string): Promise<ConnectorDisconnected> { return this.command({ action: 'connector_disconnect', tokenId }); }
+  /** Admin: probes the model provider from the hub. Takes up to ~20 s (two requests plus an egress lookup). */
+  modelDiagnose(): Promise<ModelDiagnosis> { return this.command({ action: 'model_diagnose' }, { timeoutMs: 45_000 }); }
   register(name: string, client?: string): Promise<{ id: string; name: string; expiresAt: number }> {
     return this.command({ action: 'register', name, ...(client ? { client } : {}) });
   }

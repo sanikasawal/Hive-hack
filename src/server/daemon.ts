@@ -1,10 +1,11 @@
 import { readFileSync } from 'node:fs';
-import { createServer } from 'node:http';
+import { createServer, type IncomingMessage } from 'node:http';
 import { basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HiveService, sanitizeEvents } from '../service.ts';
 import { Store } from '../store/sqlite.ts';
-import { AuthError, OPERATOR_MEMBER, authorizeCommand, authorizeRoute, resolveAuth, type Auth } from './auth.ts';
+import { AuthError, OPERATOR_MEMBER, authorizeCommand, authorizeRoute, bearer, isPublicAction, resolveAuth, type Auth } from './auth.ts';
+import { PairingService, RateLimitError } from './pairing.ts';
 import { createMcpHttpHandler } from './mcpHttp.ts';
 import { commandSchema, type Command } from './schemas.ts';
 import { prepareRepository } from './prepare.ts';
@@ -25,27 +26,63 @@ const service = new HiveService({ store, root, tsconfig: process.env.HIVE_TSCONF
 const coordinator = service.coordinator;
 const adminToken: string = token;
 const tokens = new TokenService(store);
+const pairing = new PairingService({ store, tokens });
 const publicUrl = process.env.HIVE_PUBLIC_URL?.trim() || null;
 const hiveVersion = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version?: string }).version ?? 'unknown';
 const OPERATOR_AUTH: Auth = { role: 'admin', member: OPERATOR_MEMBER, tokenId: null };
+/** Caller of pair_start / pair_poll without a bearer: no member, no token, no privileges. */
+const PUBLIC_AUTH: Auth = { role: 'viewer', member: 'public', tokenId: null };
+/** Request facts some commands need: the client address (pairing rate limit) and the hub URL as the client sees it. */
+export interface RequestContext { ip: string; hub: string }
 
-/** GET /me: who the caller is and what this service is. The root path is only shown to admins. */
-function me(auth: Auth): unknown {
+/** The hub's base URL: HIVE_PUBLIC_URL, else derived from X-Forwarded-Proto and Host. */
+function hubFor(request: IncomingMessage): string {
+  if (publicUrl) return publicUrl.replace(/\/+$/, '');
+  const forwarded = String(request.headers['x-forwarded-proto'] ?? '').split(',')[0]!.trim();
+  return `${forwarded === 'https' ? 'https' : 'http'}://${request.headers.host ?? `127.0.0.1:${portSource}`}`;
+}
+/** Client address: the right-most X-Forwarded-For entry (added by the platform proxy), else the socket peer. */
+function clientIp(request: IncomingMessage): string {
+  const forwarded = String(request.headers['x-forwarded-for'] ?? '').split(',').map(part => part.trim()).filter(Boolean);
+  return forwarded.at(-1) ?? request.socket.remoteAddress ?? 'unknown';
+}
+function contextFor(request: IncomingMessage): RequestContext { return { ip: clientIp(request), hub: hubFor(request) }; }
+
+/** GET /me: who the caller is and what this service is (everything the CLI needs). The root path is only shown to admins. */
+function me(auth: Auth, hub: string): unknown {
   const analyzer = service.analyzer as { configured?: boolean; model?: string };
-  return { role: auth.role, member: auth.member, tokenId: auth.tokenId,
+  const base = publicUrl ?? hub;
+  return { role: auth.role, member: auth.member, tokenId: auth.tokenId, kind: auth.kind ?? (auth.tokenId === null ? 'operator' : 'member'),
+    ...(auth.kind === 'connector' ? { connector: { repoIdentity: auth.repoIdentity ?? null, machine: auth.machine ?? null } } : {}),
     workspace: { id: coordinator.workspaceId, name: basename(coordinator.root), ...(auth.role === 'admin' ? { root: coordinator.root } : {}) },
-    publicUrl, model: { configured: analyzer.configured ?? true, model: analyzer.model ?? 'custom' }, version: hiveVersion };
+    publicUrl, hubUrl: base, connect: { cliCommand: `npx hive-connect connect --hub ${base}` },
+    model: { configured: analyzer.configured ?? true, model: analyzer.model ?? 'custom' }, version: hiveVersion };
+}
+
+/** connector_disconnect: a connector revokes itself; a member names one of their own connectors; an admin any connector. */
+function disconnectConnector(auth: Auth, tokenId: string | undefined): unknown {
+  const target = tokenId ?? (auth.kind === 'connector' ? auth.tokenId : null);
+  if (!target) throw new Error('connector_disconnect needs tokenId unless called with the connector credential itself');
+  const record = tokens.get(target);
+  if (!record || record.kind !== 'connector') throw new Error('Unknown connector');
+  if (auth.role !== 'admin') {
+    if (auth.kind === 'connector' && target !== auth.tokenId) throw new AuthError(403, 'Forbidden: a connector may only disconnect itself');
+    if (record.member !== auth.member) throw new AuthError(403, 'Forbidden: connector belongs to another member');
+  }
+  const revoked = tokens.revoke(target);
+  const cleared = service.checkouts.clear(target);
+  return { disconnected: true, tokenId: target, revokedAt: revoked.revokedAt, checkoutCleared: cleared };
 }
 
 /**
  * Runs one command through the service's command wrapper: counted as in flight (shutdown drains it)
  * and, on success, marks the cached snapshot dirty so the next read reflects the change.
  */
-export function execute(command: Command, auth: Auth = OPERATOR_AUTH): Promise<unknown> {
-  return service.track(() => dispatch(command, auth));
+export function execute(command: Command, auth: Auth = OPERATOR_AUTH, context: RequestContext = { ip: 'local', hub: publicUrl ?? `http://127.0.0.1:${portSource}` }): Promise<unknown> {
+  return service.track(() => dispatch(command, auth, context));
 }
 
-function dispatch(command: Command, auth: Auth): unknown | Promise<unknown> {
+function dispatch(command: Command, auth: Auth, context: RequestContext): unknown | Promise<unknown> {
   switch (command.action) {
     case 'register': return coordinator.register(command.name, { workspace: command.workspace, client: command.client, tokenId: auth.tokenId, member: auth.member });
     case 'heartbeat': return coordinator.heartbeat(command.sessionId);
@@ -67,15 +104,29 @@ function dispatch(command: Command, auth: Auth): unknown | Promise<unknown> {
     case 'sync': return service.sync();
     case 'hook_check': return service.hookCheck(command.file);
     case 'analysis_relay_request': return service.analysis.relayRequest();
+    case 'model_diagnose': return service.analysis.diagnose();
     case 'analysis_relay_submit': return service.analysis.relaySubmit({ ...command, via: auth.member });
     case 'remote_status': return { ...service.remote.state(), member: auth.member };
     case 'remote_push': return service.remote.push(auth.member, { files: command.files, baseCommit: command.baseCommit ?? null, replace: command.replace });
     case 'remote_check': return service.remote.check(auth.member, { path: command.path, content: command.content }, command.baseCommit ?? null);
-    case 'member_list': return service.members(auth.role === 'admin' ? tokens.list() : []);
-    case 'token_create': return tokens.create({ label: command.label, member: command.member, role: command.role, createdBy: auth.tokenId ?? auth.member });
+    // Members see no token metadata, only their own active connectors.
+    case 'member_list': return auth.role === 'admin' ? service.members(tokens.list())
+      : service.members([], undefined, tokens.list().filter(t => t.kind === 'connector' && t.member === auth.member));
+    case 'token_create': return tokens.create({ label: command.label, member: command.member, role: command.role, kind: command.kind, createdBy: auth.tokenId ?? auth.member });
     case 'token_list': return tokens.list();
     case 'token_rename': return tokens.rename(command.tokenId, command.label);
     case 'token_revoke': return tokens.revoke(command.tokenId);
+    case 'pair_start': return pairing.start({ repo: command.repo, machine: command.machine, client: command.client }, context);
+    case 'pair_poll': return pairing.poll(command.pairingId, command.pollSecret);
+    case 'pair_info': return pairing.info(command.userCode);
+    case 'pair_approve': return pairing.approve(command.userCode, { member: auth.role === 'admin' && command.member ? command.member : auth.member, tokenId: auth.tokenId });
+    case 'pair_deny': return pairing.deny(command.userCode);
+    case 'checkout_report': {
+      const checkout = service.checkouts.report({ tokenId: auth.tokenId, member: auth.member, boundIdentity: auth.repoIdentity ?? null, machine: auth.machine ?? null }, command);
+      if (auth.tokenId) tokens.touchSeen(auth.tokenId);
+      return checkout;
+    }
+    case 'connector_disconnect': return disconnectConnector(auth, command.tokenId);
   }
 }
 
@@ -125,8 +176,7 @@ const server = createServer(async (request, response) => {
   // Laptop setup scripts: public, secret-free JavaScript (see src/server/scripts.ts).
   if (request.method === 'GET' && (requestPath === '/hook.mjs' || requestPath === '/connect.mjs')) {
     try {
-      const forwarded = String(request.headers['x-forwarded-proto'] ?? '').split(',')[0]!.trim();
-      const hub = publicUrl ?? `${forwarded === 'https' ? 'https' : 'http'}://${request.headers.host ?? `127.0.0.1:${portSource}`}`;
+      const hub = hubFor(request);
       const body = requestPath === '/hook.mjs' ? hookScript() : connectScript(hub);
       response.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' }).end(body);
     } catch (error) {
@@ -142,6 +192,23 @@ const server = createServer(async (request, response) => {
   const pathname = new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
   if (ui.handle(request, response, pathname)) return;
   response.setHeader('Content-Type', 'application/json');
+  // Unauthenticated device pairing: POST /command without a bearer accepts pair_start and pair_poll ONLY,
+  // with a small body cap. Everything else without a bearer is 401 as before.
+  if (request.method === 'POST' && pathname === '/command' && !bearer(request.headers.authorization)) {
+    try {
+      let body = '';
+      for await (const chunk of request) {
+        body += String(chunk);
+        if (body.length > 16 * 1024) throw new Error('Request too large');
+      }
+      const parsed = JSON.parse(body) as { action?: unknown } | null;
+      if (!isPublicAction(parsed?.action)) { response.writeHead(401).end(JSON.stringify({ error: 'Unauthorized' })); return; }
+      response.end(JSON.stringify(await execute(commandSchema.parse(parsed), PUBLIC_AUTH, contextFor(request))));
+    } catch (error) {
+      response.writeHead(error instanceof RateLimitError ? 429 : 400).end(JSON.stringify({ error: error instanceof Error ? error.message : 'Request failed' }));
+    }
+    return;
+  }
   // Every other route: HIVE_TOKEN (admin) or an active member/viewer token; viewers only reach viewer-safe GETs.
   let auth: Auth;
   try {
@@ -149,6 +216,8 @@ const server = createServer(async (request, response) => {
     authorizeRoute(auth, request.method ?? 'GET', pathname);
   } catch (error) {
     const status = error instanceof AuthError ? error.status : 401;
+    // Auth failures on the MCP route are logged (rate-limited) so misconfigured clients are visible in the service logs.
+    if (pathname === '/mcp') mcpHttp.authFailed(request, status, error instanceof Error ? error.message : 'unauthorized');
     response.writeHead(status).end(JSON.stringify({ error: status === 401 ? 'Unauthorized' : (error as Error).message })); return;
   }
   if (pathname === '/mcp') {
@@ -159,7 +228,7 @@ const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1');
     if (request.method === 'GET' && url.pathname === '/me') {
-      response.end(JSON.stringify(me(auth))); return;
+      response.end(JSON.stringify(me(auth, hubFor(request)))); return;
     }
     // Both read the cached snapshot; ?fresh=1 forces a sync for members/admins (ignored for viewers).
     const fresh = url.searchParams.get('fresh') === '1' && auth.role !== 'viewer';
@@ -188,9 +257,9 @@ const server = createServer(async (request, response) => {
     }
     const command = commandSchema.parse(JSON.parse(body));
     authorizeCommand(auth, command, id => coordinator.session(id));
-    response.end(JSON.stringify(await execute(command, auth)));
+    response.end(JSON.stringify(await execute(command, auth, contextFor(request))));
   } catch (error) {
-    response.writeHead(error instanceof AuthError ? error.status : 400).end(JSON.stringify({ error: error instanceof Error ? error.message : 'Request failed' }));
+    response.writeHead(error instanceof AuthError || error instanceof RateLimitError ? error.status : 400).end(JSON.stringify({ error: error instanceof Error ? error.message : 'Request failed' }));
   }
 });
 server.requestTimeout = 15_000;

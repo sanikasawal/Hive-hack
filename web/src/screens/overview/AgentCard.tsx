@@ -4,10 +4,19 @@ import { Avatar } from '@/components/arc/avatar/avatar';
 import { Card } from '@/components/arc/card/card';
 import { Progress } from '@/components/arc/progress/progress';
 import { Stepper, type StepperStep } from '@/components/arc/stepper/stepper';
+import type { ServiceSnapshot } from '@/api/types';
 import { AGENT_STEPS, CLIENTS, type AgentStepKey, type AgentView } from '@/mock';
 import { formatRelative, parseSymbolKey, useMediaQuery } from '@/shell';
 import { STATE_LABEL, leaseText } from './derive';
 import styles from './overview.module.css';
+
+type SessionConnector = NonNullable<ServiceSnapshot['sessions'][number]['connector']>;
+
+/** Hive Connect checkout of the agent's machine: "main@1a2b3c4 · 2 local changes". */
+export function checkoutText(c: SessionConnector): string {
+  const where = `${c.branch ?? 'detached HEAD'}${c.headShort ? `@${c.headShort}` : ''}`;
+  return `${where} · ${c.dirtyCount === 0 ? 'no local changes' : `${c.dirtyCount} local ${c.dirtyCount === 1 ? 'change' : 'changes'}`}`;
+}
 
 const sentence = (text: string) => (text ? text[0]!.toUpperCase() + text.slice(1) : text);
 const unique = <T,>(items: T[]) => [...new Set(items)];
@@ -32,6 +41,7 @@ export function AgentCard({ agent, workspaceName, sessionName, now, viewer = fal
 }) {
   const { session, intent, progress, memberName, agentName } = agent;
   const client = CLIENTS.find(c => c.id === session.client)?.name ?? session.client ?? null;
+  const connector = (session as { connector?: SessionConnector | null }).connector ?? null;
   const verified = progress.key === 'verified';
   const conflict = agent.findings.find(f => f.severity === 'error') ?? agent.findings.find(f => f.severity === 'warning');
   const others = conflict ? unique(conflict.sessions.filter(id => id !== session.id)).map(sessionName) : [];
@@ -59,9 +69,9 @@ export function AgentCard({ agent, workspaceName, sessionName, now, viewer = fal
       title={title}
       description={intent?.task ?? 'No intent declared yet.'}
       avatar={<Avatar name={memberName} size="sm" />}
-      meta={client ? `${memberName} · ${client}` : memberName}
-      status={viewer ? workspaceName : `${workspaceName} · ${leaseText(session, now)}`}
-      details={<AgentDetails agent={agent} client={client} workspaceName={workspaceName} now={now} viewer={viewer} />}
+      meta={[memberName, client, connector?.machine].filter(Boolean).join(' · ')}
+      status={[connector ? checkoutText(connector) : workspaceName, viewer ? null : leaseText(session, now)].filter(Boolean).join(' · ')}
+      details={<AgentDetails agent={agent} client={client} workspaceName={workspaceName} now={now} viewer={viewer} connector={connector} />}
     >
       <div className={styles.agentSteps}>
         {wide ? (
@@ -88,7 +98,7 @@ export function AgentCard({ agent, workspaceName, sessionName, now, viewer = fal
   );
 }
 
-function AgentDetails({ agent, client, workspaceName, now, viewer }: { agent: AgentView; client: string | null; workspaceName: string; now: number; viewer: boolean }) {
+function AgentDetails({ agent, client, workspaceName, now, viewer, connector }: { agent: AgentView; client: string | null; workspaceName: string; now: number; viewer: boolean; connector: SessionConnector | null }) {
   const { intent, progress, contracts, findings, session } = agent;
   return (
     <dl className={styles.facts}>
@@ -116,6 +126,12 @@ function AgentDetails({ agent, client, workspaceName, now, viewer }: { agent: Ag
         <div>
           <dt>Assumptions</dt>
           <dd><ul className={styles.codeList}>{intent.assumptions.map(a => <li key={a.key}><code>{a.key}</code> is <code>{a.value}</code></li>)}</ul></dd>
+        </div>
+      )}
+      {connector && (
+        <div>
+          <dt>Checkout</dt>
+          <dd>{`${connector.repoName || workspaceName}${connector.machine ? ` on ${connector.machine}` : ''}: ${checkoutText(connector)}. Reported ${formatRelative(connector.reportedAt, now)}.`}</dd>
         </div>
       )}
       <div>
